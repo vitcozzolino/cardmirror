@@ -1,6 +1,6 @@
 # TODO: Scale costs based on the table from BL
 # https://docs.google.com/spreadsheets/d/1E2iSRhhNUjaZ3MblXx_rflpOIkMwK40OgX5X6yXE4zw/edit#gid=1033599937
-cost_per_card = {"normal": 2, "holo": 2.2}
+cost_per_card = {"normal": 2, "holo": 2}
 
 # URI of cards list
 # Examples of input are:

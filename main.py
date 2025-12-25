@@ -5,108 +5,124 @@ import jellyfish
 
 from utils import CardOrder, load_card_list
 
-logging.basicConfig(
-    level=logging.getLevelName(config.LOG_LEVEL),
-    format="[%(asctime)s]::[%(levelname)s]::%(message)s",
-)
 
-
-# Vars
-to_order = []
-missing = []
-set_counters = {}
-
-
-def card_lookup(card_name: str, df_col, set, quantity=1):
-    found = False
-    similarity_score = 0
-
-    for elem in df_col:
-        skip = False
-        if card_name.lower() in elem.lower() and elem.lower().startswith(
-            card_name.lower()
-        ):
-            tokens_a = card_name.lower().split(" ")
-            tokens_b = elem.lower().split(" ")
-
-            # Priority token matching based on wanted card name
-            # to avoid the "Damn" -> "Damnation" 'cases'.
-            for idx, word_r in enumerate(tokens_a):
-                if word_r != tokens_b[idx]:
-                    skip = True
-
-            if not skip and (
-                jellyfish.jaro_winkler_similarity(card_name.lower(), elem.lower())
-                > similarity_score
-            ):
-                temp_set = set
-                temp_name = elem
-                found = True
-                similarity_score = jellyfish.jaro_winkler_similarity(
-                    card_name.lower(), elem.lower()
-                )
-                logging.debug(f"{card_name} {elem} {similarity_score}")
-
-    if found:
-        to_order.append(CardOrder(temp_name, temp_set, quantity)) # type: ignore
-        if set in set_counters:
-            set_counters[set] += int(quantity)
-        else:
-            set_counters[set] = 1
-
-    return found
-
-
-if __name__ == "__main__":
-    st = time.process_time()
-
-    # Loads card list from disk or remote link
-    df = load_card_list(config.URI)
-
-    # Main search loop. Inefficient, but it works
-    for index, row in df.iterrows():
-        found = False
-        if row["Wanted"] != "":
-            for col in df.columns:
-                if col not in ["Wanted", "QTY"] and card_lookup(
-                    row["Wanted"], df[col], col, quantity=row["QTY"]
-                ):
-                    found = True
-                    if config.EXIT_AT_FIRST_MATCH:
-                        break
-
-            if not found:
-                missing.append(row["Wanted"])
-
-    logging.info("Total Missing Cards: %d" % len(missing))
-    logging.info(set_counters)
-
-    logging.info(
-        "Total estimated cost (no discount, no delivery): %.2f $"
-        % (
-            set_counters["REGULAR SINGLE CARDS"] * config.cost_per_card["normal"]
-            + (
-                (set_counters["HOLO SINGLE CARDS"] + set_counters["FOIL SINGLE CARDS"])
-                * config.cost_per_card["holo"]
-            )
-        )
+def setup_logging():
+    """Sets up the logging configuration based on the provided log level in the config.
+    The log format includes the timestamp, log level, and message.
+    """
+    logging.basicConfig(
+        level=logging.getLevelName(config.LOG_LEVEL),
+        format="[%(asctime)s]::[%(levelname)s]::%(message)s",
     )
 
-    # Write on disk
+
+def card_lookup(
+    card_name: str, candidates, card_set, quantity=1, set_counters=None, to_order=None
+):
+    """
+    Attempts to find the best matching card name from a list of candidates and adds it to the order list.
+    Args:
+        card_name (str): The name of the card to look up.
+        candidates (list): A list of candidate card names to search through.
+        card_set: The set to which the card belongs.
+        quantity (int, optional): The number of cards to order. Defaults to 1.
+        set_counters (dict, optional): A dictionary tracking the count of cards per set.
+        to_order (list, optional): A list to append the CardOrder object to.
+    Returns:
+        bool: True if a matching card was found and added to the order, False otherwise.
+    """
+    best_match = None
+    best_score = 0
+
+    for candidate in candidates:
+        candidate_lower = candidate.lower()
+        card_name_lower = card_name.lower()
+        if card_name_lower in candidate_lower and candidate_lower.startswith(
+            card_name_lower
+        ):
+            tokens_a = card_name_lower.split()
+            tokens_b = candidate_lower.split()
+            if all(
+                tokens_a[i] == tokens_b[i]
+                for i in range(min(len(tokens_a), len(tokens_b)))
+            ):
+                score = jellyfish.jaro_winkler_similarity(
+                    card_name_lower, candidate_lower
+                )
+                if score > best_score:
+                    best_score = score
+                    best_match = candidate
+
+    if best_match:
+        logging.debug(f"{card_name} {best_match} {best_score}")
+        to_order.append(CardOrder(best_match, card_set, quantity))
+        set_counters[card_set] = set_counters.get(card_set, 0) + int(quantity)
+        return True
+    return False
+
+
+def process_cards(df, set_counters, to_order, missing):
+    for _, row in df.iterrows():
+        wanted = row.get("Wanted", "")
+        quantity = row.get("QTY", 1)
+        if wanted:
+            found = False
+            for col in df.columns:
+                if col not in ["Wanted", "QTY"]:
+                    if card_lookup(
+                        wanted, df[col], col, quantity, set_counters, to_order
+                    ):
+                        found = True
+                        if config.EXIT_AT_FIRST_MATCH:
+                            break
+            if not found:
+                missing.append(wanted)
+
+
+def write_output(to_order, missing):
     with open("output/order.csv", "w", newline="") as f:
-        f.write(f"Card Name|Set|Quantity\n")
+        f.write("Card Name|Set|Quantity\n")
         for item in to_order:
-            f.write("%s\n" % item)
+            f.write(f"{item}\n")
 
     with open("output/missing.txt", "w", newline="") as f:
         f.write("--- MISSING CARDS ---\n")
         for item in missing:
-            f.write("%s\n" % item)
+            f.write(f"{item}\n")
 
-    # get the end time
+
+def estimate_cost(set_counters):
+    regular = set_counters.get("REGULAR SINGLE CARDS", 0)
+    holo = set_counters.get("HOLO SINGLE CARDS", 0)
+    foil = set_counters.get("FOIL SINGLE CARDS", 0)
+    cost = (
+        regular * config.cost_per_card["normal"]
+        + (holo + foil) * config.cost_per_card["holo"]
+    )
+    logging.info(f"Total estimated cost (no discount, no delivery): {cost:.2f} $")
+
+
+def main():
+    setup_logging()
+    st = time.process_time()
+
+    df = load_card_list(config.URI)
+    to_order = []
+    missing = []
+    set_counters = {}
+
+    process_cards(df, set_counters, to_order, missing)
+
+    logging.info(f"Total Missing Cards: {len(missing)}")
+    logging.info(set_counters)
+
+    write_output(to_order, missing)
+    estimate_cost(set_counters)
+
     et = time.process_time()
-
-    # get execution time
-    res = et - st
-    logging.debug(f"CPU Execution time: {res} seconds")
+    logging.debug(f"CPU Execution time: {et - st} seconds")
     logging.info("Done!")
+
+
+if __name__ == "__main__":
+    main()
