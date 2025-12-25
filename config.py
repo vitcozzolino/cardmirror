@@ -6,7 +6,7 @@ cost_per_card = {"normal": 2, "holo": 2.2}
 # Examples of input are:
 # - "https://docs.google.com/spreadsheets/d/xxxxxxxxxxxxx/export?format=csv&#gid=0"
 # - "res/examples.csv"
-URI = "res/examples.csv"
+URI = "https://docs.google.com/spreadsheets/d/1b2YVUgpXOJn2tykYbHju2F7nmfODqS3Ap2rYvjn58Pw/export?format=csv&gid=0"
 
 # Set to False to add to the output list all matches found
 # for each card (useful when you want edit manually the output
