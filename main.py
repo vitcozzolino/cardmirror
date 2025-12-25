@@ -10,6 +10,7 @@ logging.basicConfig(
     format="[%(asctime)s]::[%(levelname)s]::%(message)s",
 )
 
+
 # Vars
 to_order = []
 missing = []
@@ -47,7 +48,7 @@ def card_lookup(card_name: str, df_col, set, quantity=1):
                 logging.debug(f"{card_name} {elem} {similarity_score}")
 
     if found:
-        to_order.append(CardOrder(temp_name, temp_set, quantity))
+        to_order.append(CardOrder(temp_name, temp_set, quantity)) # type: ignore
         if set in set_counters:
             set_counters[set] += int(quantity)
         else:

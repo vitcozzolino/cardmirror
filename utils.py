@@ -18,11 +18,10 @@ def load_card_list(URI):
     if URI.startswith("https:") or URI.startswith("http:"):
         df = get_csv_from_gcloud(URI)
     else:
-        df = pd.read_csv(URI, header=0, squeeze=True)
+        df = pd.read_csv(URI, header=0)
 
     df.fillna("", inplace=True)
     return df
-
 
 def get_csv_from_gcloud(URI):
     logging.info("Downloading csv list from Google Cloud...")
