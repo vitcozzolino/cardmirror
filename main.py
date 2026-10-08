@@ -1,11 +1,19 @@
 import time
 import logging
 from pathlib import Path
+import re
 import config
 import jellyfish
 import requests
 
-from utils import CardOrder, load_card_list, load_vendor_price_tiers
+from selector import CardSelector
+from utils import (
+    CardCandidate,
+    CardOrder,
+    load_card_list,
+    load_vendor_image_links,
+    load_vendor_price_tiers,
+)
 
 
 def setup_logging():
@@ -18,77 +26,93 @@ def setup_logging():
     )
 
 
-def card_lookup(
-    card_name: str, candidates, card_set, quantity=1, set_counters=None, to_order=None
-):
-    """
-    Attempts to find the best matching card name from a list of candidates and adds it to the order list.
-    Args:
-        card_name (str): The name of the card to look up.
-        candidates (list): A list of candidate card names to search through.
-        card_set: The set to which the card belongs.
-        quantity (int, optional): The number of cards to order. Defaults to 1.
-        set_counters (dict, optional): A dictionary tracking the count of cards per set.
-        to_order (list, optional): A list to append the CardOrder object to.
-    Returns:
-        bool: True if a matching card was found and added to the order, False otherwise.
-    """
-    best_match = None
-    best_score = 0
+def find_card_candidates(card_name, vendor_cards, image_links):
+    card_name_lower = card_name.lower()
+    candidates = []
 
-    for candidate in candidates:
-        candidate_lower = candidate.lower()
-        card_name_lower = card_name.lower()
-        if card_name_lower in candidate_lower and candidate_lower.startswith(
-            card_name_lower
-        ):
-            tokens_a = card_name_lower.split()
-            tokens_b = candidate_lower.split()
-            if all(
-                tokens_a[i] == tokens_b[i]
-                for i in range(min(len(tokens_a), len(tokens_b)))
+    for card_set in vendor_cards.columns:
+        card_set_candidates = []
+        for candidate in vendor_cards[card_set]:
+            if not isinstance(candidate, str):
+                continue
+
+            candidate_lower = candidate.lower()
+            if not candidate_lower.startswith(card_name_lower):
+                continue
+
+            wanted_tokens = card_name_lower.split()
+            candidate_tokens = candidate_lower.split()
+            if not all(
+                wanted_tokens[index] == candidate_tokens[index]
+                for index in range(min(len(wanted_tokens), len(candidate_tokens)))
             ):
-                score = jellyfish.jaro_winkler_similarity(
-                    card_name_lower, candidate_lower
-                )
-                if score > best_score:
-                    best_score = score
-                    best_match = candidate
+                continue
 
-    if best_match:
-        logging.debug(f"{card_name} {best_match} {best_score}")
-        to_order.append(CardOrder(best_match, card_set, quantity))
-        set_counters[card_set] = set_counters.get(card_set, 0) + int(quantity)
-        return True
-    return False
+            score = jellyfish.jaro_winkler_similarity(card_name_lower, candidate_lower)
+            image_url = image_links.get((card_set, candidate))
+            if not image_url:
+                original_set_name = re.sub(r"\.\d+$", "", card_set)
+                image_url = image_links.get((original_set_name, candidate))
+            card_set_candidates.append(
+                CardCandidate(candidate, card_set, image_url, score)
+            )
+
+        candidates.extend(
+            sorted(card_set_candidates, key=lambda candidate: candidate.score, reverse=True)
+        )
+
+    return candidates
 
 
-def process_cards(wanted_cards, vendor_cards, set_counters, to_order, missing):
+def add_to_order(candidate, quantity, set_counters, to_order):
+    logging.debug("Selected %s from %s", candidate.name, candidate.card_set)
+    to_order.append(CardOrder(candidate.name, candidate.card_set, quantity))
+    set_counters[candidate.card_set] = (
+        set_counters.get(candidate.card_set, 0) + int(quantity)
+    )
+
+
+def process_cards(
+    wanted_cards,
+    vendor_cards,
+    set_counters,
+    to_order,
+    missing,
+    image_links=None,
+    card_selector=None,
+):
     required_columns = {"Wanted"}
     missing_columns = required_columns - set(wanted_cards.columns)
     if missing_columns:
         columns = ", ".join(sorted(missing_columns))
         raise ValueError(f"Wanted-card list is missing required columns: {columns}")
 
+    image_links = image_links or {}
     for _, row in wanted_cards.iterrows():
         wanted = row.get("Wanted", "")
         quantity = row.get("QTY", 1) or 1
         if wanted:
-            found = False
-            for card_set in vendor_cards.columns:
-                if card_lookup(
-                    wanted,
-                    vendor_cards[card_set],
-                    card_set,
-                    quantity,
-                    set_counters,
-                    to_order,
-                ):
-                    found = True
-                    if config.MATCH_FIRST_CANDIDATE:
-                        break
-            if not found:
+            candidates = find_card_candidates(wanted, vendor_cards, image_links)
+            if not candidates:
                 missing.append(wanted)
+                continue
+
+            if card_selector and len(candidates) > 1:
+                try:
+                    selected = card_selector.select(wanted, candidates)
+                except RuntimeError as error:
+                    logging.warning("Image selector unavailable: %s", error)
+                    card_selector = None
+                    selected = candidates[0]
+                if not selected:
+                    missing.append(wanted)
+                    continue
+                add_to_order(selected, quantity, set_counters, to_order)
+            elif config.MATCH_FIRST_CANDIDATE:
+                add_to_order(candidates[0], quantity, set_counters, to_order)
+            else:
+                for candidate in candidates:
+                    add_to_order(candidate, quantity, set_counters, to_order)
 
 
 def write_output(to_order, missing):
@@ -148,8 +172,32 @@ def main():
     to_order = []
     missing = []
     set_counters = {}
+    image_links = {}
+    card_selector = None
 
-    process_cards(wanted_cards, vendor_cards, set_counters, to_order, missing)
+    if config.ENABLE_IMAGE_SELECTION:
+        try:
+            image_links = load_vendor_image_links(
+                config.CATALOG_WORKBOOK_URL,
+                config.CATALOG_WORKBOOK_SHEET_NAME,
+                config.CATALOG_HEADER_ROW,
+                config.CATALOG_ROWS_TO_SKIP_AFTER_HEADER,
+            )
+            card_selector = CardSelector(
+                config.IMAGE_SELECTION_COLUMNS,
+            )
+        except (OSError, requests.RequestException, ValueError) as error:
+            logging.warning("Could not load vendor image links: %s", error)
+
+    process_cards(
+        wanted_cards,
+        vendor_cards,
+        set_counters,
+        to_order,
+        missing,
+        image_links,
+        card_selector,
+    )
 
     logging.info(f"Total Missing Cards: {len(missing)}")
     logging.info(set_counters)

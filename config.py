@@ -14,6 +14,11 @@ OUTPUT_DIRECTORY = "output"
 # every match so you can select a specific version manually.
 MATCH_FIRST_CANDIDATE = True
 
+# Open a local browser picker when a requested card has multiple matching versions.
+ENABLE_IMAGE_SELECTION = True
+
+IMAGE_SELECTION_COLUMNS = 3
+
 
 # -----------------------------------------------------------------------------
 # Black Lotus vendor integration
@@ -29,6 +34,11 @@ CATALOG_URL = (
 )
 CATALOG_HEADER_ROW = 1
 CATALOG_ROWS_TO_SKIP_AFTER_HEADER = 2
+CATALOG_WORKBOOK_URL = (
+    "https://docs.google.com/spreadsheets/d/"
+    "1E2iSRhhNUjaZ3MblXx_rflpOIkMwK40OgX5X6yXE4zw/export?format=xlsx"
+)
+CATALOG_WORKBOOK_SHEET_NAME = "Holo Sets"
 
 # Public instructions export containing the live single-card quantity tiers.
 PRICING_URL = (

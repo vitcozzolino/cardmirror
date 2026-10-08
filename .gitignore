@@ -2,5 +2,5 @@
 *.pyc
 *.ipynb_checkpoints
 config.py
-output/*
+.output/
 .venv/

@@ -13,6 +13,11 @@ columns; Google Sheet exports remain optional.
 The estimated total uses the vendor's live single-card quantity tiers and excludes
 delivery costs.
 
+When a card has multiple available versions, the app opens a local browser picker
+with the vendor's linked card images. Click the version you want and it is written
+to `output/order.csv`. Set `ENABLE_IMAGE_SELECTION` to `False` in `config.py` to
+use automatic matching without the picker.
+
 As `output`, it generates a `csv` with the list of [card name, set, quantity] matching with the cards offered by the specific vendor. Additionally, it will generate a `missing.txt` file with the cards that were not found.
 
 Finally, MTG Autoproxy is not fail proof! Always double check the output before ordering your proxies :)
@@ -39,6 +44,7 @@ Finally, MTG Autoproxy is not fail proof! Always double check the output before 
    1. `WANTED_CARDS_SOURCE`: local path of your wanted-card list (defaults to `res/wanted_cards.csv`).
    2. `OUTPUT_DIRECTORY`: folder for `order.csv` and `missing.txt` (defaults to `output`).
    3. `MATCH_FIRST_CANDIDATE`: set to `False` to include every matching version for manual selection.
+   4. `ENABLE_IMAGE_SELECTION`: set to `False` to skip the visual card picker.
 
    The Black Lotus catalog and pricing URLs are kept in a separate section. Leave
    them unchanged unless the vendor restructures its public spreadsheet.
