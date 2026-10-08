@@ -1,9 +1,11 @@
 import time
 import logging
+from pathlib import Path
 import config
 import jellyfish
+import requests
 
-from utils import CardOrder, load_card_list
+from utils import CardOrder, load_card_list, load_vendor_price_tiers
 
 
 def setup_logging():
@@ -61,63 +63,99 @@ def card_lookup(
     return False
 
 
-def process_cards(df, set_counters, to_order, missing):
-    for _, row in df.iterrows():
+def process_cards(wanted_cards, vendor_cards, set_counters, to_order, missing):
+    required_columns = {"Wanted"}
+    missing_columns = required_columns - set(wanted_cards.columns)
+    if missing_columns:
+        columns = ", ".join(sorted(missing_columns))
+        raise ValueError(f"Wanted-card list is missing required columns: {columns}")
+
+    for _, row in wanted_cards.iterrows():
         wanted = row.get("Wanted", "")
-        quantity = row.get("QTY", 1)
+        quantity = row.get("QTY", 1) or 1
         if wanted:
             found = False
-            for col in df.columns:
-                if col not in ["Wanted", "QTY"]:
-                    if card_lookup(
-                        wanted, df[col], col, quantity, set_counters, to_order
-                    ):
-                        found = True
-                        if config.EXIT_AT_FIRST_MATCH:
-                            break
+            for card_set in vendor_cards.columns:
+                if card_lookup(
+                    wanted,
+                    vendor_cards[card_set],
+                    card_set,
+                    quantity,
+                    set_counters,
+                    to_order,
+                ):
+                    found = True
+                    if config.MATCH_FIRST_CANDIDATE:
+                        break
             if not found:
                 missing.append(wanted)
 
 
 def write_output(to_order, missing):
-    with open("output/order.csv", "w", newline="") as f:
+    output_directory = Path(config.OUTPUT_DIRECTORY)
+    output_directory.mkdir(parents=True, exist_ok=True)
+
+    with open(output_directory / "order.csv", "w", newline="") as f:
         f.write("Card Name|Set|Quantity\n")
         for item in to_order:
             f.write(f"{item}\n")
 
-    with open("output/missing.txt", "w", newline="") as f:
+    with open(output_directory / "missing.txt", "w", newline="") as f:
         f.write("--- MISSING CARDS ---\n")
         for item in missing:
             f.write(f"{item}\n")
 
 
-def estimate_cost(set_counters):
-    regular = set_counters.get("REGULAR SINGLE CARDS", 0)
-    holo = set_counters.get("HOLO SINGLE CARDS", 0)
-    foil = set_counters.get("FOIL SINGLE CARDS", 0)
-    cost = (
-        regular * config.cost_per_card["normal"]
-        + (holo + foil) * config.cost_per_card["holo"]
+def estimate_cost(to_order):
+    total_cards = sum(int(item.quantity) for item in to_order)
+    if not total_cards:
+        logging.info("No cards found, so no price estimate was calculated.")
+        return
+
+    try:
+        price_tiers = load_vendor_price_tiers(config.PRICING_URL)
+        applicable_tiers = [
+            price
+            for minimum_quantity, price in price_tiers
+            if total_cards >= minimum_quantity
+        ]
+        if not applicable_tiers:
+            raise ValueError(f"No price tier covers an order of {total_cards} cards")
+        price_per_card = applicable_tiers[-1]
+    except (requests.RequestException, ValueError) as error:
+        logging.warning("Could not calculate the vendor price: %s", error)
+        return
+
+    cost = total_cards * price_per_card
+    logging.info(
+        "Estimated single-card cost for %d cards at $%.2f/card, excluding delivery: $%.2f",
+        total_cards,
+        price_per_card,
+        cost,
     )
-    logging.info(f"Total estimated cost (no discount, no delivery): {cost:.2f} $")
 
 
 def main():
     setup_logging()
     st = time.process_time()
 
-    df = load_card_list(config.URI)
+    wanted_cards = load_card_list(config.WANTED_CARDS_SOURCE)
+    vendor_cards = load_card_list(
+        config.CATALOG_URL,
+        header_row=config.CATALOG_HEADER_ROW,
+        rows_to_skip_after_header=config.CATALOG_ROWS_TO_SKIP_AFTER_HEADER,
+    )
     to_order = []
     missing = []
     set_counters = {}
 
-    process_cards(df, set_counters, to_order, missing)
+    process_cards(wanted_cards, vendor_cards, set_counters, to_order, missing)
 
     logging.info(f"Total Missing Cards: {len(missing)}")
     logging.info(set_counters)
 
     write_output(to_order, missing)
-    estimate_cost(set_counters)
+    estimate_cost(to_order)
 
     et = time.process_time()
     logging.debug(f"CPU Execution time: {et - st} seconds")

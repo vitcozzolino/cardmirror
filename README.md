@@ -6,7 +6,12 @@ MTG Autoproxy is a Python program to automatically generate a vendor-specific li
 
 For example, if you have `Ancient Tomb` in the list of wanted cards, the program will select the matching proxy card for it (in this case, `Ancient Tomb English`) based on [Jaro–Winkler distance](http://en.wikipedia.org/wiki/Jaro%E2%80%93Winkler_distance). In the case of blacklotus, it also prioritises regular cards (non foil/holo).
 
-MTG Autoproxy supports loading of a `csv` file from disk (check the `res` folder) or Google Spreadsheets from a remote link.
+MTG Autoproxy downloads Black Lotus's current catalog automatically, then matches it
+against a local wanted-card CSV file. The wanted list only needs `Wanted` and `QTY`
+columns; Google Sheet exports remain optional.
+
+The estimated total uses the vendor's live single-card quantity tiers and excludes
+delivery costs.
 
 As `output`, it generates a `csv` with the list of [card name, set, quantity] matching with the cards offered by the specific vendor. Additionally, it will generate a `missing.txt` file with the cards that were not found.
 
@@ -14,23 +19,34 @@ Finally, MTG Autoproxy is not fail proof! Always double check the output before 
 
 # Prerequisites
 
-- Python 3.x or higher
-- A list of wanted cards formatted as `res/example.csv`
+- Python 3.10 or higher
+- [uv](https://docs.astral.sh/uv/getting-started/installation/)
+- A list of wanted cards formatted as `res/wanted_cards.csv`
   
 # Running MTG Autoproxy
 
-1. Install the required libraries with `pip install -r requirements.txt`
-2. Open `config.py` and edit the following variables:
-   1. `URI`: should be set to the url of the Google Spreadsheets to download. If you provide a path, it will instead load a csv file from disk.
-   2. `EXIT_AT_FIRST_MATCH`: If set to False, the program will  add to the output list **all** matches found for each card (useful when you want to manually select a specific version/art).
-3. Run `python main.py`.
-4. Check the output in `output/order.csv` and `order/missing.txt`.
+1. Create the virtual environment and install locked dependencies with `uv sync`.
+2. Create a wanted-card list with these columns:
+
+   ```csv
+   Wanted,QTY
+   Ancient Tomb,1
+   "Atraxa, Grand Unifier",2
+   ```
+
+   A starter file is available at `res/wanted_cards.csv`.
+3. Open `config.py` to adjust the settings you need:
+   1. `WANTED_CARDS_SOURCE`: local path of your wanted-card list (defaults to `res/wanted_cards.csv`).
+   2. `OUTPUT_DIRECTORY`: folder for `order.csv` and `missing.txt` (defaults to `output`).
+   3. `MATCH_FIRST_CANDIDATE`: set to `False` to include every matching version for manual selection.
+
+   The Black Lotus catalog and pricing URLs are kept in a separate section. Leave
+   them unchanged unless the vendor restructures its public spreadsheet.
+4. Run `uv run main.py`.
+5. Check the output in `output/order.csv` and `output/missing.txt`.
 
 # Planned Improvements
 
 - Add more customization options (e.g., preferred card art, preferred card language, etc.).
 - Improve search loop.
-- Adjust cost calculation based on vendor's discount table.
 - Support multiple vendors.
-- Simplify `csv` structure and automate retrieval of vendors's list (have the user write only the wanted cards and quantity).
-

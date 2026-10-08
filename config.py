@@ -1,17 +1,44 @@
-# TODO: Scale costs based on the table from BL
-# https://docs.google.com/spreadsheets/d/1E2iSRhhNUjaZ3MblXx_rflpOIkMwK40OgX5X6yXE4zw/edit#gid=1033599937
-cost_per_card = {"normal": 2, "holo": 2}
+"""Settings for generating a Black Lotus proxy order."""
 
-# URI of cards list
-# Examples of input are:
-# - "https://docs.google.com/spreadsheets/d/xxxxxxxxxxxxx/export?format=csv&#gid=0"
-# - "res/examples.csv"
-URI = "https://docs.google.com/spreadsheets/d/1b2YVUgpXOJn2tykYbHju2F7nmfODqS3Ap2rYvjn58Pw/export?format=csv&gid=0"
+# -----------------------------------------------------------------------------
+# Your order
+# -----------------------------------------------------------------------------
 
-# Set to False to add to the output list all matches found
-# for each card (useful when you want edit manually the output
-# list to select a specific version/art)
-EXIT_AT_FIRST_MATCH = True
+# Path or URL of a CSV with a required `Wanted` column and optional `QTY` column.
+WANTED_CARDS_SOURCE = "res/wanted_cards.csv"
 
-# Loggin level
-LOG_LEVEL = "DEBUG"
+# Folder where order.csv and missing.txt are created.
+OUTPUT_DIRECTORY = "output"
+
+# True adds only the first match for each requested card. Set to False to include
+# every match so you can select a specific version manually.
+MATCH_FIRST_CANDIDATE = True
+
+
+# -----------------------------------------------------------------------------
+# Black Lotus vendor integration
+# -----------------------------------------------------------------------------
+
+VENDOR_NAME = "Black Lotus"
+
+# Public catalog export. The header and skip settings account for the sheet's
+# title and link rows; change them only if the vendor restructures the sheet.
+CATALOG_URL = (
+    "https://docs.google.com/spreadsheets/d/"
+    "1E2iSRhhNUjaZ3MblXx_rflpOIkMwK40OgX5X6yXE4zw/export?format=csv&gid=251059144"
+)
+CATALOG_HEADER_ROW = 1
+CATALOG_ROWS_TO_SKIP_AFTER_HEADER = 2
+
+# Public instructions export containing the live single-card quantity tiers.
+PRICING_URL = (
+    "https://docs.google.com/spreadsheets/d/"
+    "1E2iSRhhNUjaZ3MblXx_rflpOIkMwK40OgX5X6yXE4zw/export?format=csv&gid=1033599937"
+)
+
+
+# -----------------------------------------------------------------------------
+# Diagnostics
+# -----------------------------------------------------------------------------
+
+LOG_LEVEL = "INFO"
