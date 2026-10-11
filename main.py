@@ -2,6 +2,7 @@ import time
 import logging
 from pathlib import Path
 import re
+import unicodedata
 import config
 import jellyfish
 import requests
@@ -10,9 +11,11 @@ from selector import CardSelector
 from utils import (
     CardCandidate,
     CardOrder,
-    load_card_list,
-    load_vendor_image_links,
+    load_vendor_catalog,
+    load_vendor_catalog_cache,
     load_vendor_price_tiers,
+    load_wanted_cards,
+    sync_vendor_catalog_cache,
 )
 
 
@@ -26,8 +29,42 @@ def setup_logging():
     )
 
 
+def normalize_card_name(card_name):
+    normalized = unicodedata.normalize("NFKD", card_name)
+    normalized = normalized.replace("Æ", "AE").replace("æ", "ae")
+    normalized = normalized.encode("ascii", "ignore").decode().lower()
+    return re.sub(r"[^a-z0-9]+", " ", normalized).strip()
+
+
+def card_name_variants(card_name):
+    variants = {normalize_card_name(card_name)}
+    variants.update(normalize_card_name(value) for value in re.findall(r"\(([^)]+)\)", card_name))
+    variants.update(
+        normalize_card_name(value)
+        for value in re.split(r"\s*//?\s*", card_name)
+    )
+    return {variant for variant in variants if variant}
+
+
+def match_score(wanted_name, candidate_name):
+    wanted = normalize_card_name(wanted_name)
+    if not wanted:
+        return None
+
+    scores = []
+    for variant in card_name_variants(candidate_name):
+        if f" {wanted} " in f" {variant} ":
+            scores.append(1.0 if variant == wanted else 0.99)
+            continue
+
+        similarity = jellyfish.jaro_winkler_similarity(wanted, variant)
+        if similarity >= config.FUZZY_MATCH_THRESHOLD:
+            scores.append(similarity)
+
+    return max(scores, default=None)
+
+
 def find_card_candidates(card_name, vendor_cards, image_links):
-    card_name_lower = card_name.lower()
     candidates = []
 
     for card_set in vendor_cards.columns:
@@ -36,19 +73,9 @@ def find_card_candidates(card_name, vendor_cards, image_links):
             if not isinstance(candidate, str):
                 continue
 
-            candidate_lower = candidate.lower()
-            if not candidate_lower.startswith(card_name_lower):
+            score = match_score(card_name, candidate)
+            if score is None:
                 continue
-
-            wanted_tokens = card_name_lower.split()
-            candidate_tokens = candidate_lower.split()
-            if not all(
-                wanted_tokens[index] == candidate_tokens[index]
-                for index in range(min(len(wanted_tokens), len(candidate_tokens)))
-            ):
-                continue
-
-            score = jellyfish.jaro_winkler_similarity(card_name_lower, candidate_lower)
             image_url = image_links.get((card_set, candidate))
             if not image_url:
                 original_set_name = re.sub(r"\.\d+$", "", card_set)
@@ -61,7 +88,16 @@ def find_card_candidates(card_name, vendor_cards, image_links):
             sorted(card_set_candidates, key=lambda candidate: candidate.score, reverse=True)
         )
 
-    return candidates
+    unique_candidates = []
+    seen_names = set()
+    for candidate in candidates:
+        normalized_name = normalize_card_name(candidate.name)
+        if normalized_name in seen_names:
+            continue
+        seen_names.add(normalized_name)
+        unique_candidates.append(candidate)
+
+    return unique_candidates
 
 
 def add_to_order(candidate, quantity, set_counters, to_order):
@@ -88,6 +124,7 @@ def process_cards(
         raise ValueError(f"Wanted-card list is missing required columns: {columns}")
 
     image_links = image_links or {}
+    selection_requests = []
     for _, row in wanted_cards.iterrows():
         wanted = row.get("Wanted", "")
         quantity = row.get("QTY", 1) or 1
@@ -98,21 +135,31 @@ def process_cards(
                 continue
 
             if card_selector and len(candidates) > 1:
-                try:
-                    selected = card_selector.select(wanted, candidates)
-                except RuntimeError as error:
-                    logging.warning("Image selector unavailable: %s", error)
-                    card_selector = None
-                    selected = candidates[0]
-                if not selected:
-                    missing.append(wanted)
-                    continue
-                add_to_order(selected, quantity, set_counters, to_order)
+                selection_requests.append((wanted, quantity, candidates))
             elif config.MATCH_FIRST_CANDIDATE:
                 add_to_order(candidates[0], quantity, set_counters, to_order)
             else:
                 for candidate in candidates:
                     add_to_order(candidate, quantity, set_counters, to_order)
+
+    if not selection_requests:
+        return
+
+    try:
+        selections, additional_selections = card_selector.select_all(selection_requests)
+    except RuntimeError as error:
+        logging.warning("Image selector unavailable: %s", error)
+        selections = [candidates[0] for _, _, candidates in selection_requests]
+        additional_selections = []
+
+    for (wanted, quantity, _), selected in zip(selection_requests, selections):
+        if not selected:
+            missing.append(wanted)
+            continue
+        add_to_order(selected, quantity, set_counters, to_order)
+
+    for selected, quantity in additional_selections:
+        add_to_order(selected, quantity, set_counters, to_order)
 
 
 def write_output(to_order, missing):
@@ -128,6 +175,27 @@ def write_output(to_order, missing):
         f.write("--- MISSING CARDS ---\n")
         for item in missing:
             f.write(f"{item}\n")
+
+    with open(output_directory / "order.md", "w", encoding="utf-8") as f:
+        f.write("# Proxy Order\n\n")
+        f.write("| Card Name | Set | Quantity |\n")
+        f.write("| --- | --- | ---: |\n")
+        for item in to_order:
+            f.write(
+                f"| {markdown_cell(item.name)} | {markdown_cell(item.set)} | "
+                f"{item.quantity} |\n"
+            )
+
+    with open(output_directory / "missing.md", "w", encoding="utf-8") as f:
+        f.write("# Missing or Skipped Cards\n\n")
+        f.write("| Card Name |\n")
+        f.write("| --- |\n")
+        for item in missing:
+            f.write(f"| {markdown_cell(item)} |\n")
+
+
+def markdown_cell(value):
+    return str(value).replace("\\", "\\\\").replace("|", "\\|").replace("\n", " ")
 
 
 def estimate_cost(to_order):
@@ -163,31 +231,35 @@ def main():
     setup_logging()
     st = time.process_time()
 
-    wanted_cards = load_card_list(config.WANTED_CARDS_SOURCE)
-    vendor_cards = load_card_list(
-        config.CATALOG_URL,
-        header_row=config.CATALOG_HEADER_ROW,
-        rows_to_skip_after_header=config.CATALOG_ROWS_TO_SKIP_AFTER_HEADER,
-    )
+    wanted_cards = load_wanted_cards(config.WANTED_CARDS_SOURCE)
+    if config.REFRESH_CATALOG_CACHE_ON_RUN:
+        try:
+            fresh_vendor_cards, fresh_image_links = load_vendor_catalog(
+                config.CATALOG_WORKBOOK_URL,
+                config.CATALOG_WORKBOOK_SHEET_NAMES,
+                header_row=config.CATALOG_HEADER_ROW,
+                rows_to_skip_after_header=config.CATALOG_ROWS_TO_SKIP_AFTER_HEADER,
+            )
+            cached_cards = sync_vendor_catalog_cache(
+                config.CATALOG_CACHE_PATH,
+                fresh_vendor_cards,
+                fresh_image_links,
+            )
+            logging.info("Refreshed %d vendor card entries in the local cache.", cached_cards)
+        except (OSError, requests.RequestException, ValueError) as error:
+            logging.warning("Could not refresh vendor catalog: %s", error)
+            logging.info("Using the local vendor catalog cache.")
+    else:
+        logging.info("Using the local vendor catalog cache without refreshing it.")
+
+    vendor_cards, image_links = load_vendor_catalog_cache(config.CATALOG_CACHE_PATH)
     to_order = []
     missing = []
     set_counters = {}
-    image_links = {}
     card_selector = None
 
     if config.ENABLE_IMAGE_SELECTION:
-        try:
-            image_links = load_vendor_image_links(
-                config.CATALOG_WORKBOOK_URL,
-                config.CATALOG_WORKBOOK_SHEET_NAME,
-                config.CATALOG_HEADER_ROW,
-                config.CATALOG_ROWS_TO_SKIP_AFTER_HEADER,
-            )
-            card_selector = CardSelector(
-                config.IMAGE_SELECTION_COLUMNS,
-            )
-        except (OSError, requests.RequestException, ValueError) as error:
-            logging.warning("Could not load vendor image links: %s", error)
+        card_selector = CardSelector(config.CATALOG_CACHE_PATH)
 
     process_cards(
         wanted_cards,

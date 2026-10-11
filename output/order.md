@@ -1,0 +1,12 @@
+# Proxy Order
+
+| Card Name | Set | Quantity |
+| --- | --- | ---: |
+| Artist's Talent #124 | SINGLES: HOLO CARDS | 4 |
+| Into the Flood Maw(洪水の大口へ) foil | SINGLES: FOIL CARDS | 3 |
+| Riverglide Pathway // Lavaglide Pathway ZNR (Borderless) | SINGLES: HOLO CARDS | 4 |
+| Otawara, Soaring City #414 borderless holo | SINGLES: HOLO CARDS | 1 |
+| Steam Vents    Guildpact | SINGLES: REGULAR CARDS | 4 |
+| Ledger Shredder extend art | SINGLES: HOLO CARDS | 4 |
+| Spirebluff Canal | SINGLES: HOLO CARDS | 4 |
+| Atraxa, Grand Unifier ONE regular | SINGLES: HOLO CARDS | 4 |
