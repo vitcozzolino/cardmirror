@@ -32,6 +32,9 @@ MAX_SELECTION_BODY_BYTES = 256 * 1024
 MAX_CLIENT_LOG_BYTES = 4096
 MAX_MARKET_BODY_BYTES = 64 * 1024
 MAX_SEARCH_QUERY_LENGTH = 200
+APPLICATION_NAME = "MTG Autoproxy"
+FAVICON_LINK = '<link rel="icon" type="image/png" href="/favicon.png">' \
+    '<meta name="theme-color" content="#101311">'
 
 
 def google_full_image_url(image_url):
@@ -43,6 +46,17 @@ def google_full_image_url(image_url):
     if not separator or not size_parameters.startswith(("w", "h", "s")):
         return image_url
     return urlunparse(parsed_url._replace(path=f"{path_prefix}=s0"))
+
+
+def google_thumbnail_url(image_url, width=600):
+    parsed_url = urlparse(image_url)
+    hostname = parsed_url.hostname or ""
+    if hostname != "googleusercontent.com" and not hostname.endswith(".googleusercontent.com"):
+        return image_url
+    path_prefix, separator, size_parameters = parsed_url.path.rpartition("=")
+    if not separator or not size_parameters.startswith(("w", "h", "s")):
+        return image_url
+    return urlunparse(parsed_url._replace(path=f"{path_prefix}=w{width}"))
 
 
 class OpenGraphImageParser(HTMLParser):
@@ -89,7 +103,13 @@ class ThumbnailCache:
     def get_or_fetch(self, source_url):
         record = self._get_record(source_url)
         cached_image = self._read_cached_image(record)
-        if cached_image and time.time() - record["fetched_at"] <= self.max_age_seconds:
+        cached_url = record["resolved_url"] if record else ""
+        legacy_google_preview = "=w600-h315" in cached_url
+        if (
+            cached_image
+            and not legacy_google_preview
+            and time.time() - record["fetched_at"] <= self.max_age_seconds
+        ):
             self._touch(source_url)
             return (
                 cached_image[0],
@@ -104,7 +124,7 @@ class ThumbnailCache:
             headers=source_headers,
             timeout=30,
         )
-        if source_response.status_code == 304 and cached_image:
+        if source_response.status_code == 304 and cached_image and not legacy_google_preview:
             source_response.close()
             self._touch(source_url)
             return (
@@ -127,16 +147,21 @@ class ThumbnailCache:
             raise ValueError("The image page does not expose an Open Graph image")
 
         resolved_image_url = urljoin(source_url, parser.image_url)
+        thumbnail_image_url = google_thumbnail_url(resolved_image_url)
         image_response = request_remote(
-            resolved_image_url,
-            headers=self._conditional_headers(record, "image"),
+            thumbnail_image_url,
+            headers=(
+                self._conditional_headers(record, "image")
+                if thumbnail_image_url == cached_url
+                else {}
+            ),
             stream=True,
             timeout=30,
         )
         if image_response.status_code == 304 and cached_image:
             image_response.close()
             self._touch(source_url)
-            return cached_image[0], cached_image[1], resolved_image_url, True
+            return cached_image[0], cached_image[1], thumbnail_image_url, True
         if image_response.status_code == 304:
             image_response.close()
             image_response = request_remote(
@@ -156,7 +181,7 @@ class ThumbnailCache:
             image_response.close()
         self._store(
             source_url,
-            resolved_image_url,
+            thumbnail_image_url,
             content_type,
             image_bytes,
             source_response_headers,
@@ -669,7 +694,8 @@ class CardSelector:
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<title>Choose proxy versions</title>
+<title>{APPLICATION_NAME} — Card Review</title>
+{FAVICON_LINK}
 <style>
 :root {{
   --background: #101311;
@@ -800,7 +826,7 @@ button:hover {{ filter: brightness(1.08); transform: translateY(-1px); }}
 <header>
 <div class="header-inner">
 <p class="eyebrow">MTG Autoproxy / Card review</p>
-<h1>Build your proxy order</h1>
+<h1>Proxy order made easy</h1>
 <p class="hint">Open a row, choose a version, set the quantity, and confirm it.</p>
 <label class="search-label" for="proxy-search">Add a card</label>
 <div class="search"><input id="proxy-search" type="search" autocomplete="off" placeholder="Search the vendor catalog to add a proxy">
@@ -834,6 +860,7 @@ const imageModalClose = document.getElementById('image-modal-close');
 const expandedImage = document.getElementById('expanded-image');
 const imageModalCaption = document.getElementById('image-modal-caption');
 const priceTiers = {price_tiers_json};
+const restoredSelectionState = null;
 const currencyFormatter = new Intl.NumberFormat('en-US', {{ style: 'currency', currency: 'USD' }});
 let searchTimer;
 let readyThumbnailCount = 0;
@@ -1266,7 +1293,47 @@ function bindRow(row) {{
   }});
 }}
 
+function restoreSelectionState() {{
+  if (!restoredSelectionState) return;
+  for (const restored of restoredSelectionState.initial || []) {{
+    const row = document.querySelector('[data-row-key="initial-' + restored.row + '"]');
+    if (!row) continue;
+    const radio = Array.from(row.querySelectorAll('input[type="radio"]'))
+      .find((input) => Number.parseInt(input.value, 10) === restored.choice);
+    if (!radio) continue;
+    radio.checked = true;
+    const quantity = row.querySelector('.quantity-input');
+    if (quantity) quantity.value = restored.quantity;
+    const confirmed = row.querySelector('input[name^="confirmed-"]');
+    if (confirmed) confirmed.value = '1';
+    row.dataset.confirmed = 'true';
+    row.dataset.cancelled = 'false';
+    row.querySelector('.status').textContent = 'Confirmed';
+    row.querySelector('details').open = false;
+  }}
+  for (const restored of restoredSelectionState.additional || []) {{
+    if (!restored.id) continue;
+    const result = {{
+      id: restored.id,
+      name: restored.name,
+      card_set: restored.card_set,
+      image_path: restored.image_path,
+      image_full_url: restored.image_full_url,
+    }};
+    addSearchCard(result, [result]);
+    const row = draftArea.lastElementChild;
+    const radio = row && row.querySelector('input[type="radio"]');
+    if (!row || !radio) continue;
+    radio.checked = true;
+    radio.dispatchEvent(new Event('change', {{ bubbles: true }}));
+    const quantity = row.querySelector('.quantity-input');
+    if (quantity) quantity.value = restored.quantity;
+    row.querySelector('.confirm-row').click();
+  }}
+}}
+
 document.querySelectorAll('.card-row').forEach(bindRow);
+restoreSelectionState();
 updateDraftArea();
 updateConfirmedCount();
 updateLiveTotal();
@@ -1301,6 +1368,10 @@ preloadFullImages(document);
                 f'href="/finish?session={session_id}"',
             )
             page = page.replace(
+                'href="/edit"',
+                f'href="/edit?session={session_id}"',
+            )
+            page = page.replace(
                 'href="/cancel"',
                 f'href="/cancel?session={session_id}"',
             )
@@ -1308,6 +1379,12 @@ preloadFullImages(document);
             image_id: image_data[image_page_url]
             for image_page_url, image_id in image_ids.items()
         }
+        favicon_path = Path(__file__).resolve().parent / "res" / "mtg_autoproxy_icon.png"
+        try:
+            favicon_data = favicon_path.read_bytes()
+        except OSError as error:
+            logger.warning("Could not load application favicon from %s: %s", favicon_path, error)
+            favicon_data = None
         selector = self
         last_recap = {"selected_rows": [], "skipped_rows": []}
 
@@ -1317,7 +1394,7 @@ preloadFullImages(document);
                     prefetcher.note_activity()
                 parsed_url = urlparse(self.path)
                 query = parse_qs(parsed_url.query)
-                if parsed_url.path in {"/select", "/finish", "/cancel"} and not self._session_matches(query):
+                if parsed_url.path in {"/select", "/edit", "/finish", "/cancel"} and not self._session_matches(query):
                     self.send_error(403, "Invalid selection session")
                     return
                 if parsed_url.path == "/search":
@@ -1331,8 +1408,14 @@ preloadFullImages(document);
                 if parsed_url.path.startswith("/images/"):
                     self._serve_image(parsed_url.path)
                     return
+                if parsed_url.path == "/favicon.png":
+                    self._serve_favicon()
+                    return
                 if parsed_url.path == "/select":
                     self._save_selections(query)
+                    return
+                if parsed_url.path == "/edit":
+                    self._continue_editing()
                     return
                 if parsed_url.path == "/finish":
                     self._finish_session()
@@ -1507,6 +1590,18 @@ preloadFullImages(document);
                 self.end_headers()
                 self.wfile.write(image)
 
+            def _serve_favicon(self):
+                if favicon_data is None:
+                    self.send_error(404)
+                    return
+                self.send_response(200)
+                self.send_header("Content-Type", "image/png")
+                self.send_header("Content-Length", str(len(favicon_data)))
+                self.send_header("X-Content-Type-Options", "nosniff")
+                self.send_header("Cache-Control", "public, max-age=86400")
+                self.end_headers()
+                self.wfile.write(favicon_data)
+
             def _save_selections(self, query):
                 selected_rows = []
                 skipped_rows = []
@@ -1556,6 +1651,48 @@ preloadFullImages(document);
                         session_id,
                     )
 
+            def _continue_editing(self):
+                restore_state = {
+                    "initial": [
+                        {
+                            "row": request_index,
+                            "choice": choice,
+                            "quantity": selection_quantities[request_index],
+                        }
+                        for request_index, choice in enumerate(selections)
+                        if choice is not None
+                    ],
+                    "additional": [],
+                }
+                for candidate, quantity in additional_selections:
+                    image_id = image_ids.get(candidate.image_url)
+                    image = image_data_by_id.get(image_id)
+                    restore_state["additional"].append(
+                        {
+                            "id": candidate.catalog_id,
+                            "name": candidate.name,
+                            "card_set": candidate.card_set,
+                            "image_path": f"/images/{image_id}" if image_id is not None else None,
+                            "image_full_url": (
+                                google_full_image_url(image[2])
+                                if image and len(image) > 2
+                                else None
+                            ),
+                            "quantity": quantity,
+                        }
+                    )
+                editing_page = page.replace(
+                    "const restoredSelectionState = null;",
+                    "const restoredSelectionState = " + json.dumps(restore_state) + ";",
+                    1,
+                )
+                logger.info(
+                    "Restoring %d confirmed initial cards and %d added cards for editing.",
+                    len(restore_state["initial"]),
+                    len(restore_state["additional"]),
+                )
+                self._respond_html(editing_page)
+
             def _finish_session(self):
                 if session_store and session_id:
                     session_store.finish(session_id)
@@ -1579,7 +1716,9 @@ preloadFullImages(document);
                 try:
                     self._respond_html(
                         """<!doctype html><html lang="en"><head><meta charset="utf-8">
-<title>Proxy session cancelled</title><style>
+<title>""" + APPLICATION_NAME + """ — Session Cancelled</title>"""
+                        + FAVICON_LINK
+                        + """<style>
 body { background: #101311; color: #f4f7f3; font-family: system-ui, sans-serif; margin: 0; padding: 12vh 24px; text-align: center; }
 main { margin: auto; max-width: 620px; } p { color: #9ca99f; }
 </style></head><body><main><h1>Proxy session cancelled</h1>
@@ -1590,6 +1729,7 @@ main { margin: auto; max-width: 620px; } p { color: #9ca99f; }
 
             def _recap_html(self, selected_rows, skipped_rows, finished=False):
                 total_quantity = sum(quantity for _, _, quantity in selected_rows)
+                session_query = f"?session={session_id}" if session_id else ""
                 market_estimate = None
                 if selector.market_provider:
                     market_estimate = selector.market_provider.estimate_rows(
@@ -1632,9 +1772,9 @@ main { margin: auto; max-width: 620px; } p { color: #9ca99f; }
                     )
                 else:
                     action_markup = (
-                        '<button type="button" onclick="history.back()">Continue editing</button>'
-                        '<a class="finish" href="/finish">Finish order</a>'
-                        '<a class="cancel" href="/cancel">Cancel session</a>'
+                        f'<a class="continue" href="/edit{session_query}">Continue editing</a>'
+                        f'<a class="finish" href="/finish{session_query}">Finish order</a>'
+                        f'<a class="cancel" href="/cancel{session_query}">Cancel session</a>'
                     )
                 market_markup = ""
                 if market_estimate:
@@ -1680,7 +1820,8 @@ main { margin: auto; max-width: 620px; } p { color: #9ca99f; }
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<title>Proxy order recap</title>
+<title>{APPLICATION_NAME} — Order Recap</title>
+{FAVICON_LINK}
 <style>
 :root {{ --background: #101311; --surface: #171c19; --surface-raised: #202722; --border: #344039; --text: #f4f7f3; --muted: #9ca99f; --accent: #b8f36b; --success: #79d98b; }}
 * {{ box-sizing: border-box; }}
@@ -1710,6 +1851,7 @@ td strong {{ color: var(--text); display: block; margin-bottom: 3px; }}
 .skipped {{ background: #2d2412; border-top: 1px solid #70552a; color: #f0c66b; font-size: .82rem; padding: 13px 16px; }}
 .actions {{ align-items: center; display: flex; gap: 10px; justify-content: flex-end; padding: 18px 20px; }}
 .actions span {{ color: var(--muted); font-size: .82rem; }}
+.continue {{ background: var(--surface-raised); border: 1px solid var(--border); border-radius: 8px; color: var(--text); font-size: .9rem; font-weight: 800; padding: 9px 13px; text-decoration: none; }}
 button {{ background: var(--accent); border: 0; border-radius: 8px; color: #243619; cursor: pointer; font-size: .9rem; font-weight: 800; padding: 10px 14px; }}
 .finish {{ background: var(--accent); border-radius: 8px; color: #243619; font-size: .9rem; font-weight: 800; padding: 10px 14px; text-decoration: none; }}
 .cancel {{ color: var(--muted); font-size: .82rem; padding: 10px 8px; text-decoration: none; }}

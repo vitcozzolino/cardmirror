@@ -29,11 +29,12 @@ class CardOrder:
 
 
 class CardCandidate:
-    def __init__(self, name, card_set, image_url, score):
+    def __init__(self, name, card_set, image_url, score, catalog_id=None):
         self.name = name
         self.card_set = card_set
         self.image_url = image_url
         self.score = score
+        self.catalog_id = catalog_id
 
 
 def load_card_list(uri, header_row=0, rows_to_skip_after_header=0):
@@ -331,7 +332,7 @@ def load_vendor_catalog_card(cache_path, card_id):
     with sqlite3.connect(cache_path) as connection:
         row = connection.execute(
             """
-            SELECT card_name, card_set, image_url
+            SELECT id, card_name, card_set, image_url
             FROM catalog_cards
             WHERE id = ?
             """,
@@ -340,7 +341,7 @@ def load_vendor_catalog_card(cache_path, card_id):
 
     if not row:
         return None
-    return CardCandidate(row[0], row[1], row[2], 1.0)
+    return CardCandidate(row[1], row[2], row[3], 1.0, catalog_id=row[0])
 
 
 def normalize_catalog_name(card_name):
