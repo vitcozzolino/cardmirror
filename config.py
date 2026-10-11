@@ -36,6 +36,10 @@ CATALOG_CACHE_PATH = "output/vendor_catalog.sqlite3"
 THUMBNAIL_CACHE_DIRECTORY = "output/thumbnail_cache"
 THUMBNAIL_CACHE_MAX_AGE_DAYS = 30
 THUMBNAIL_CACHE_MAX_SIZE_MB = 512
+# Opportunistically warm uncached catalog thumbnails while the picker is idle.
+THUMBNAIL_PREFETCH_ENABLED = True
+THUMBNAIL_PREFETCH_WORKERS = 2
+THUMBNAIL_PREFETCH_IDLE_SECONDS = 2.0
 SELECTION_SESSION_DATABASE_PATH = "output/selection_sessions.sqlite3"
 
 # True refreshes the complete local catalog mirror from the vendor workbook before
@@ -61,6 +65,46 @@ PRICING_URL = (
     "https://docs.google.com/spreadsheets/d/"
     "1E2iSRhhNUjaZ3MblXx_rflpOIkMwK40OgX5X6yXE4zw/export?format=csv&gid=1033599937"
 )
+
+
+# -----------------------------------------------------------------------------
+# Market comparison
+# -----------------------------------------------------------------------------
+
+# Default market backend. Scryfall requires no credentials and exposes
+# set-specific EUR printing prices. Cardmarket remains available as an optional
+# backend when API access is approved.
+MARKET_PRICE_PROVIDER = "scryfall"
+SCRYFALL_ENABLED = True
+SCRYFALL_CACHE_PATH = "output/scryfall_cache.sqlite3"
+SCRYFALL_CACHE_HOURS = 24
+SCRYFALL_FOIL_MODE = "auto"  # auto, normal, or foil
+MARKET_VENDOR_CURRENCY = "USD"
+# Optional vendor-currency-to-EUR rate. Leave as None to avoid false savings.
+MARKET_VENDOR_TO_EUR_RATE = None
+
+# Cardmarket access is optional. Set CARDMARKET_CONSUMER_KEY and
+# CARDMARKET_CONSUMER_SECRET in the environment to enable it. Access tokens
+# are optional for app-only requests, but can be supplied when Cardmarket
+# provides user credentials for the application.
+CARDMARKET_ENABLED = True
+CARDMARKET_CACHE_PATH = "output/cardmarket_cache.sqlite3"
+CARDMARKET_API_BASE_URL = "https://apiv2.cardmarket.com/ws/v2.0"
+CARDMARKET_PRICE_GUIDE_BASE_URL = "https://api.cardmarket.com/ws/v2.0"
+CARDMARKET_PRICE_SOURCE = "articles"
+CARDMARKET_PRICE_GUIDE_FALLBACK = True
+CARDMARKET_ARTICLE_CACHE_MINUTES = 15
+CARDMARKET_PRICE_GUIDE_CACHE_HOURS = 24
+CARDMARKET_PRODUCT_CACHE_DAYS = 30
+CARDMARKET_LANGUAGE_ID = 1  # English
+CARDMARKET_MIN_CONDITION = "NM"
+CARDMARKET_FOIL = False
+CARDMARKET_PRICE_GUIDE_FIELD = "Trend Price"
+CARDMARKET_CURRENCY = "EUR"
+CARDMARKET_VENDOR_CURRENCY = "USD"
+# Set this to the current vendor-currency-to-Cardmarket-currency rate to enable
+# an estimated saving percentage. Leave as None to show both totals separately.
+CARDMARKET_VENDOR_TO_MARKET_RATE = None
 
 
 # -----------------------------------------------------------------------------

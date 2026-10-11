@@ -13,12 +13,13 @@ from html import escape
 from html.parser import HTMLParser
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from urllib.parse import parse_qs, urljoin, urlparse
+from urllib.parse import parse_qs, urljoin, urlparse, urlunparse
 
 import requests
 
 from utils import (
     load_vendor_catalog_card,
+    load_vendor_catalog_image_urls,
     request_remote,
     search_vendor_catalog_cache,
     search_vendor_catalog_versions,
@@ -28,7 +29,20 @@ logger = logging.getLogger(__name__)
 
 
 MAX_SELECTION_BODY_BYTES = 256 * 1024
+MAX_CLIENT_LOG_BYTES = 4096
+MAX_MARKET_BODY_BYTES = 64 * 1024
 MAX_SEARCH_QUERY_LENGTH = 200
+
+
+def google_full_image_url(image_url):
+    parsed_url = urlparse(image_url)
+    hostname = parsed_url.hostname or ""
+    if hostname != "googleusercontent.com" and not hostname.endswith(".googleusercontent.com"):
+        return image_url
+    path_prefix, separator, size_parameters = parsed_url.path.rpartition("=")
+    if not separator or not size_parameters.startswith(("w", "h", "s")):
+        return image_url
+    return urlunparse(parsed_url._replace(path=f"{path_prefix}=s0"))
 
 
 class OpenGraphImageParser(HTMLParser):
@@ -77,7 +91,12 @@ class ThumbnailCache:
         cached_image = self._read_cached_image(record)
         if cached_image and time.time() - record["fetched_at"] <= self.max_age_seconds:
             self._touch(source_url)
-            return cached_image[0], cached_image[1], True
+            return (
+                cached_image[0],
+                cached_image[1],
+                urljoin(source_url, record["resolved_url"]),
+                True,
+            )
 
         source_headers = self._conditional_headers(record, "source")
         source_response = request_remote(
@@ -88,7 +107,12 @@ class ThumbnailCache:
         if source_response.status_code == 304 and cached_image:
             source_response.close()
             self._touch(source_url)
-            return cached_image[0], cached_image[1], True
+            return (
+                cached_image[0],
+                cached_image[1],
+                urljoin(source_url, record["resolved_url"]),
+                True,
+            )
         if source_response.status_code == 304:
             source_response.close()
             source_response = request_remote(source_url, timeout=30)
@@ -102,8 +126,9 @@ class ThumbnailCache:
         if not parser.image_url:
             raise ValueError("The image page does not expose an Open Graph image")
 
+        resolved_image_url = urljoin(source_url, parser.image_url)
         image_response = request_remote(
-            urljoin(source_url, parser.image_url),
+            resolved_image_url,
             headers=self._conditional_headers(record, "image"),
             stream=True,
             timeout=30,
@@ -111,7 +136,7 @@ class ThumbnailCache:
         if image_response.status_code == 304 and cached_image:
             image_response.close()
             self._touch(source_url)
-            return cached_image[0], cached_image[1], True
+            return cached_image[0], cached_image[1], resolved_image_url, True
         if image_response.status_code == 304:
             image_response.close()
             image_response = request_remote(
@@ -131,13 +156,13 @@ class ThumbnailCache:
             image_response.close()
         self._store(
             source_url,
-            parser.image_url,
+            resolved_image_url,
             content_type,
             image_bytes,
             source_response_headers,
             image_headers,
         )
-        return image_bytes, content_type, False
+        return image_bytes, content_type, resolved_image_url, False
 
     def _connect(self):
         connection = sqlite3.connect(self.database_path, timeout=30)
@@ -336,6 +361,95 @@ class SelectionSessionStore:
         return connection
 
 
+class OpportunisticThumbnailPrefetcher:
+    def __init__(self, image_urls, loader, worker_count=2, idle_seconds=2.0):
+        self._image_urls = list(image_urls)
+        self._total_count = len(self._image_urls)
+        self._loader = loader
+        self._worker_count = max(1, int(worker_count))
+        self._idle_seconds = max(0.1, float(idle_seconds))
+        self._condition = threading.Condition()
+        self._last_activity = time.monotonic()
+        self._stop_requested = False
+        self._workers = []
+        self._completed_count = 0
+        self._failure_count = 0
+
+    def start(self):
+        if not self._total_count:
+            return
+
+        logger.info(
+            "Queued %d catalog thumbnails for idle preloading (%d workers).",
+            self._total_count,
+            self._worker_count,
+        )
+        for worker_index in range(min(self._worker_count, len(self._image_urls))):
+            worker = threading.Thread(
+                target=self._run,
+                name=f"thumbnail-prefetch-{worker_index + 1}",
+                daemon=True,
+            )
+            self._workers.append(worker)
+            worker.start()
+
+    def note_activity(self):
+        with self._condition:
+            self._last_activity = time.monotonic()
+            self._condition.notify_all()
+
+    def stop(self):
+        with self._condition:
+            self._stop_requested = True
+            self._condition.notify_all()
+        for worker in self._workers:
+            worker.join(timeout=0.25)
+
+        if self._total_count:
+            logger.info(
+                "Idle thumbnail preloading stopped: %d completed, %d failed, %d remaining.",
+                self._completed_count,
+                self._failure_count,
+                max(0, self._total_count - self._completed_count - self._failure_count),
+            )
+
+    def _run(self):
+        while True:
+            image_page_url = self._next_url_when_idle()
+            if image_page_url is None:
+                return
+
+            try:
+                self._loader(image_page_url)
+            except (OSError, requests.RequestException, ValueError, sqlite3.Error) as error:
+                with self._condition:
+                    self._failure_count += 1
+                logger.debug(
+                    "Idle thumbnail preload failed for %s: %s",
+                    image_page_url,
+                    error,
+                )
+            else:
+                with self._condition:
+                    self._completed_count += 1
+                    completed_count = self._completed_count
+                if completed_count == 1 or completed_count % 25 == 0:
+                    logger.info(
+                        "Idle thumbnail preloading: %d/%d complete.",
+                        completed_count,
+                        self._total_count,
+                    )
+
+    def _next_url_when_idle(self):
+        with self._condition:
+            while self._image_urls and not self._stop_requested:
+                idle_for = time.monotonic() - self._last_activity
+                if idle_for >= self._idle_seconds:
+                    return self._image_urls.pop()
+                self._condition.wait(self._idle_seconds - idle_for)
+            return None
+
+
 class CardSelector:
     def __init__(
         self,
@@ -345,15 +459,34 @@ class CardSelector:
         thumbnail_cache_max_size_mb=512,
         session_database_path="output/selection_sessions.sqlite3",
         price_tiers=None,
+        market_provider=None,
+        thumbnail_prefetch_enabled=True,
+        thumbnail_prefetch_workers=2,
+        thumbnail_prefetch_idle_seconds=2.0,
     ):
         self.catalog_cache_path = catalog_cache_path
         self.price_tiers = list(price_tiers or [])
+        self.market_provider = market_provider
         self.thumbnail_cache = ThumbnailCache(
             thumbnail_cache_directory,
             max_age_days=thumbnail_cache_max_age_days,
             max_size_mb=thumbnail_cache_max_size_mb,
         )
         self.session_store = SelectionSessionStore(session_database_path)
+        self.thumbnail_prefetch_enabled = thumbnail_prefetch_enabled
+        self.thumbnail_prefetch_workers = thumbnail_prefetch_workers
+        self.thumbnail_prefetch_idle_seconds = thumbnail_prefetch_idle_seconds
+
+    def _vendor_total_for_rows(self, selected_rows):
+        total_cards = sum(int(quantity) for _, _, quantity in selected_rows)
+        if not total_cards or not self.price_tiers:
+            return None
+        applicable_tiers = [
+            price
+            for minimum_quantity, price in self.price_tiers
+            if total_cards >= minimum_quantity
+        ]
+        return total_cards * applicable_tiers[-1] if applicable_tiers else None
 
     def select_all(self, selection_requests):
         image_data = self._preload_images(selection_requests)
@@ -363,6 +496,7 @@ class CardSelector:
         completed = threading.Event()
         session_id = self.session_store.create()
         page, image_ids = self._build_page(selection_requests, image_data)
+        prefetcher = self._create_thumbnail_prefetcher(image_data)
         handler = self._create_handler(
             page,
             image_data,
@@ -374,10 +508,12 @@ class CardSelector:
             completed,
             self.session_store,
             session_id,
+            prefetcher,
         )
         server = ThreadingHTTPServer(("127.0.0.1", 0), handler)
         server_thread = threading.Thread(target=server.serve_forever, daemon=True)
         server_thread.start()
+        prefetcher.start()
         url = f"http://127.0.0.1:{server.server_port}/?session={session_id}"
 
         try:
@@ -385,6 +521,7 @@ class CardSelector:
                 raise RuntimeError(f"Could not open the card picker at {url}")
             completed.wait()
         finally:
+            prefetcher.stop()
             server.shutdown()
             server.server_close()
             server_thread.join()
@@ -394,6 +531,19 @@ class CardSelector:
             for (_, _, candidates), index in zip(selection_requests, selections)
         ]
         return selected_candidates, selection_quantities, additional_selections
+
+    def _create_thumbnail_prefetcher(self, image_data):
+        if not self.thumbnail_prefetch_enabled:
+            return OpportunisticThumbnailPrefetcher([], self._load_image)
+
+        image_urls = set(load_vendor_catalog_image_urls(self.catalog_cache_path))
+        image_urls.difference_update(image_data)
+        return OpportunisticThumbnailPrefetcher(
+            image_urls,
+            self._load_image,
+            worker_count=self.thumbnail_prefetch_workers,
+            idle_seconds=self.thumbnail_prefetch_idle_seconds,
+        )
 
     def _preload_images(self, selection_requests):
         image_page_urls = {
@@ -419,12 +569,12 @@ class CardSelector:
             for completed_count, future in enumerate(as_completed(futures), start=1):
                 image_page_url = futures[future]
                 try:
-                    image, content_type, cache_hit = future.result()
-                    image_data[image_page_url] = image, content_type
+                    image, content_type, resolved_image_url, cache_hit = future.result()
+                    image_data[image_page_url] = image, content_type, resolved_image_url
                     cache_hits += int(cache_hit)
                 except (OSError, requests.RequestException, ValueError, sqlite3.Error) as error:
                     logger.warning(
-                        "Could not preload card image from %s: %s",
+                        "Could not load full embedded image from %s; the thumbnail will be unavailable: %s",
                         image_page_url,
                         error,
                     )
@@ -477,8 +627,20 @@ class CardSelector:
             options = []
             for candidate_index, candidate in enumerate(candidates):
                 image_id = image_ids.get(candidate.image_url)
+                image_payload = image_data.get(candidate.image_url)
+                if candidate.image_url and image_payload is None:
+                    logger.warning(
+                        "Full image unavailable for card '%s' from %s; showing a placeholder.",
+                        candidate.name,
+                        candidate.image_url,
+                    )
+                expanded_image_url = (
+                    google_full_image_url(image_payload[2])
+                    if image_payload and len(image_payload) > 2
+                    else f"/images/{image_id}"
+                )
                 image = (
-                    f'<img src="/images/{image_id}" alt="{escape(candidate.name)}">'
+                    f'<img class="option-thumbnail" src="/images/{image_id}" alt="{escape(candidate.name)}" data-full-image="{escape(expanded_image_url)}" data-local-image="/images/{image_id}" tabindex="0" role="button" aria-label="Expand {escape(candidate.name)}" loading="eager" decoding="async">'
                     if image_id is not None
                     else '<div class="missing-image">Image unavailable</div>'
                 )
@@ -530,12 +692,13 @@ header {{ backdrop-filter: blur(18px); background: rgba(16, 19, 17, .86); border
 .eyebrow {{ color: var(--accent); font-size: .7rem; font-weight: 800; letter-spacing: .14em; margin: 0; text-transform: uppercase; }}
 h1 {{ font-size: clamp(1.65rem, 3vw, 2.35rem); letter-spacing: -.04em; line-height: 1.05; margin: 8px 0; }}
 .hint {{ color: var(--muted); margin: 0 0 20px; }}
-.search-label {{ color: var(--muted); display: block; font-size: .75rem; font-weight: 750; letter-spacing: .08em; margin: 0 0 7px; text-transform: uppercase; }}
-.search {{ max-width: 760px; position: relative; }}
+.search-label {{ color: var(--muted); display: block; font-size: .75rem; font-weight: 750; letter-spacing: .08em; margin: 0 0 7px 24px; text-transform: uppercase; }}
+.search {{ margin-left: 24px; max-width: 760px; position: relative; }}
 .search input {{ background: rgba(32, 39, 34, .9); border: 1px solid var(--border-strong); border-radius: 10px; box-shadow: 0 8px 26px rgba(0, 0, 0, .18); color: var(--text); font-size: 1rem; outline: none; padding: 13px 15px; transition: border-color .16s, box-shadow .16s; width: 100%; }}
 .search input:focus {{ border-color: var(--accent); box-shadow: 0 0 0 3px rgba(184, 243, 107, .15); }}
 .suggestions {{ background: #1e251f; border: 1px solid var(--border-strong); border-radius: 10px; box-shadow: 0 18px 34px rgba(0, 0, 0, .35); display: none; left: 0; max-height: 330px; overflow-y: auto; position: absolute; right: 0; top: 49px; z-index: 3; }}
 .suggestion {{ align-items: center; background: transparent; border: 0; border-bottom: 1px solid var(--border); color: var(--text); cursor: pointer; display: flex; gap: 12px; padding: 9px; text-align: left; transition: background .12s; width: 100%; }}
+.suggestion.is-loading {{ cursor: wait; opacity: .6; }}
 .suggestion:last-child {{ border-bottom: 0; }}
 .suggestion:hover, .suggestion:focus {{ background: var(--surface-hover); outline: none; }}
 .suggestion img, .suggestion .missing-image {{ background: #080b09; border-radius: 6px; flex: 0 0 42px; height: 58px; object-fit: contain; width: 42px; }}
@@ -548,10 +711,26 @@ h1 {{ font-size: clamp(1.65rem, 3vw, 2.35rem); letter-spacing: -.04em; line-heig
 .table-heading {{ align-items: end; display: flex; justify-content: space-between; padding: 28px 24px 8px; }}
 .table-heading h2 {{ font-size: 1.2rem; letter-spacing: -.02em; margin: 4px 0 0; }}
 .table-hint {{ color: var(--muted); font-size: .82rem; }}
+.live-totals {{ display: flex; flex-wrap: wrap; gap: 10px; justify-content: flex-end; }}
 .live-total {{ background: var(--surface-raised); border: 1px solid var(--border-strong); border-radius: 10px; display: grid; gap: 2px; min-width: 180px; padding: 10px 13px; text-align: right; }}
 .live-total span {{ color: var(--muted); font-size: .68rem; font-weight: 800; letter-spacing: .08em; text-transform: uppercase; }}
 .live-total strong {{ color: var(--accent); font-size: 1.25rem; line-height: 1.1; }}
 .live-total small {{ color: var(--muted); font-size: .72rem; }}
+.thumbnail-loader {{ align-items: center; background: rgba(32, 39, 34, .96); border: 1px solid var(--border-strong); border-radius: 10px; box-shadow: 0 10px 28px rgba(0, 0, 0, .24); display: flex; gap: 11px; margin: 10px 24px 0; padding: 10px 13px; }}
+.thumbnail-loader[hidden] {{ display: none; }}
+.thumbnail-loader strong, .thumbnail-loader span {{ display: block; }}
+.thumbnail-loader strong {{ font-size: .82rem; }}
+.thumbnail-loader span {{ color: var(--muted); font-size: .74rem; margin-top: 2px; }}
+.loader-spinner {{ animation: spin .8s linear infinite; border: 2px solid var(--border-strong); border-radius: 50%; border-top-color: var(--accent); flex: 0 0 16px; height: 16px; width: 16px; }}
+@keyframes spin {{ to {{ transform: rotate(360deg); }} }}
+.option-thumbnail {{ cursor: zoom-in; }}
+.image-modal[hidden] {{ display: none; }}
+.image-modal {{ background: rgba(4, 7, 5, .88); display: grid; inset: 0; padding: 24px; place-items: center; position: fixed; z-index: 10; }}
+.image-modal-dialog {{ margin: auto; max-height: calc(100vh - 48px); position: relative; width: min(620px, 92vw); }}
+.image-modal-dialog img {{ border: 1px solid var(--border-strong); border-radius: 12px; box-shadow: 0 20px 60px rgba(0, 0, 0, .55); display: block; height: auto; margin: 0 auto; max-height: calc(100vh - 100px); max-width: 100%; object-fit: contain; }}
+.image-modal-close {{ background: var(--surface-raised); border: 1px solid var(--border-strong); color: var(--text); position: absolute; right: 10px; top: 10px; z-index: 1; }}
+.image-modal-caption {{ background: rgba(16, 19, 17, .86); border-radius: 7px; bottom: 10px; color: var(--text); font-size: .8rem; left: 10px; margin: 0; max-width: calc(100% - 20px); overflow: hidden; padding: 5px 8px; position: absolute; text-overflow: ellipsis; white-space: nowrap; }}
+body.modal-open {{ overflow: hidden; }}
 .card-table, .draft-area {{ counter-reset: card-row; padding: 0 24px; }}
 .card-table {{ margin-bottom: 90px; }}
 .card-row {{ border: 1px solid var(--border); border-radius: 12px; counter-increment: card-row; margin: 12px 0; overflow: hidden; transition: border-color .16s, transform .16s; }}
@@ -575,7 +754,7 @@ h1 {{ font-size: clamp(1.65rem, 3vw, 2.35rem); letter-spacing: -.04em; line-heig
 .row-controls label {{ color: var(--muted); font-size: .82rem; font-weight: 700; }}
 .quantity-input {{ background: var(--surface-raised); border: 1px solid var(--border-strong); border-radius: 7px; color: var(--text); font-size: .95rem; margin-left: 6px; padding: 8px; width: 78px; }}
 .quantity-input:focus {{ border-color: var(--accent); outline: none; }}
-.options {{ display: grid; gap: 13px; grid-template-columns: repeat(auto-fill, minmax(155px, 1fr)); }}
+.options {{ display: grid; gap: 13px; grid-template-columns: repeat(4, minmax(0, 1fr)); }}
 .option {{ background: var(--surface-raised); border: 2px solid transparent; border-radius: 10px; cursor: pointer; min-width: 0; overflow: hidden; padding-bottom: 9px; text-align: center; transition: border-color .14s, background .14s, transform .14s; }}
 .option:hover {{ background: var(--surface-hover); transform: translateY(-2px); }}
 .option:has(input:checked) {{ border-color: var(--accent); box-shadow: 0 0 0 1px rgba(184, 243, 107, .15); }}
@@ -585,10 +764,10 @@ h1 {{ font-size: clamp(1.65rem, 3vw, 2.35rem); letter-spacing: -.04em; line-heig
 .option strong, .option span {{ display: block; overflow: hidden; padding: 6px 8px 0; text-overflow: ellipsis; white-space: nowrap; }}
 .option span {{ color: var(--muted); font-size: .76rem; }}
 .draft-area:not(.has-drafts) {{ display: none; }}
-.draft-area {{ margin-bottom: 4px; }}
+.draft-area {{ margin: 0 auto 4px; max-width: 1100px; }}
 .draft-heading {{ color: var(--warning); font-size: .76rem; font-weight: 800; letter-spacing: .08em; margin: 20px 0 6px; text-transform: uppercase; }}
 .additional-input {{ position: absolute; opacity: 0; }}
-.submit {{ align-items: center; background: rgba(23, 28, 25, .92); border: 1px solid var(--border); border-radius: 12px; bottom: 18px; box-shadow: 0 12px 35px rgba(0, 0, 0, .35); display: flex; gap: 16px; padding: 8px; position: fixed; right: max(24px, calc((100vw - 1100px) / 2)); z-index: 4; }}
+.submit {{ align-items: center; background: rgba(23, 28, 25, .92); border: 1px solid var(--border); border-radius: 12px; box-shadow: 0 12px 35px rgba(0, 0, 0, .35); display: flex; gap: 16px; justify-content: flex-end; margin: 30px auto 0; max-width: 1100px; padding: 8px 24px; }}
 .save-note {{ color: var(--muted); font-size: .78rem; padding-left: 8px; }}
 button {{ background: var(--accent); border: 0; border-radius: 8px; color: var(--accent-dark); cursor: pointer; font-size: .9rem; font-weight: 800; padding: 10px 14px; transition: filter .14s, transform .14s; }}
 button:hover {{ filter: brightness(1.08); transform: translateY(-1px); }}
@@ -598,8 +777,11 @@ button:hover {{ filter: brightness(1.08); transform: translateY(-1px); }}
 @media (max-width: 640px) {{
   body {{ padding-bottom: 96px; }}
   header {{ padding: 20px 16px; }}
+  .search-label, .search {{ margin-left: 0; }}
   .table-heading {{ align-items: stretch; flex-direction: column; gap: 12px; padding: 22px 16px 7px; }}
+  .live-totals {{ flex-direction: column; }}
   .live-total {{ text-align: left; }}
+  .thumbnail-loader {{ margin-left: 16px; margin-right: 16px; }}
   .card-table, .draft-area {{ padding: 0 16px; }}
   .card-panel summary {{ gap: 8px; padding: 15px; }}
   .row-summary-meta {{ align-items: end; flex-direction: column; gap: 5px; }}
@@ -607,7 +789,7 @@ button:hover {{ filter: brightness(1.08); transform: translateY(-1px); }}
   .row-content {{ padding: 15px; }}
   .options {{ grid-template-columns: repeat(2, minmax(0, 1fr)); }}
   .option img, .missing-image {{ height: 180px; }}
-  .submit {{ bottom: 12px; left: 16px; right: 16px; }}
+  .submit {{ margin: 24px 16px 0; padding: 8px; }}
   .submit button {{ flex: 1; }}
   .save-note {{ display: none; }}
 }}
@@ -625,13 +807,15 @@ button:hover {{ filter: brightness(1.08); transform: translateY(-1px); }}
 <div id="suggestions" class="suggestions"></div></div>
 </div>
 </header>
+<div id="thumbnail-loader" class="thumbnail-loader" role="status" aria-live="polite"><span class="loader-spinner" aria-hidden="true"></span><div><strong>Loading thumbnails</strong><span id="thumbnail-progress">0 of 0 ready</span></div></div>
 <div id="draft-area" class="draft-area"><p class="draft-heading">Cards waiting for confirmation</p></div>
 <div class="workspace">
-<div class="table-heading"><div><p class="eyebrow">Order review</p><h2>Card versions</h2></div><div class="live-total" aria-live="polite"><span>Estimated order</span><strong id="estimated-cost">—</strong><small id="estimated-rate">Pricing unavailable</small><small id="card-total">0 cards</small></div></div>
+<div class="table-heading"><div><p class="eyebrow">Order review</p><h2>Card versions</h2></div><div class="live-totals"><div class="live-total" aria-live="polite"><span>Estimated order</span><strong id="estimated-cost">—</strong><small id="estimated-rate">Pricing unavailable</small><small id="card-total">0 cards</small></div><div class="live-total" aria-live="polite"><span>Estimated market cost</span><strong id="market-cost">—</strong><small id="market-rate">Confirm cards to estimate</small></div></div></div>
 <main id="card-table" class="card-table">{"".join(rows)}</main>
 </div>
 <div class="submit"><span id="confirmed-count" class="save-note">0 cards confirmed</span><button type="submit">Save selections <span aria-hidden="true">→</span></button></div>
 </form>
+<div id="image-modal" class="image-modal" hidden role="dialog" aria-modal="true" aria-labelledby="image-modal-caption"><div class="image-modal-dialog"><button id="image-modal-close" class="image-modal-close" type="button" aria-label="Close image preview">Close</button><img id="expanded-image" alt=""><p id="image-modal-caption" class="image-modal-caption"></p></div></div>
 <script>
 const searchInput = document.getElementById('proxy-search');
 const suggestions = document.getElementById('suggestions');
@@ -641,9 +825,24 @@ const confirmedCount = document.getElementById('confirmed-count');
 const estimatedCost = document.getElementById('estimated-cost');
 const estimatedRate = document.getElementById('estimated-rate');
 const cardTotal = document.getElementById('card-total');
+const marketCost = document.getElementById('market-cost');
+const marketRate = document.getElementById('market-rate');
+const thumbnailLoader = document.getElementById('thumbnail-loader');
+const thumbnailProgress = document.getElementById('thumbnail-progress');
+const imageModal = document.getElementById('image-modal');
+const imageModalClose = document.getElementById('image-modal-close');
+const expandedImage = document.getElementById('expanded-image');
+const imageModalCaption = document.getElementById('image-modal-caption');
 const priceTiers = {price_tiers_json};
 const currencyFormatter = new Intl.NumberFormat('en-US', {{ style: 'currency', currency: 'USD' }});
 let searchTimer;
+let readyThumbnailCount = 0;
+let searchRequestId = 0;
+let imageModalReturnFocus = null;
+let imageModalRequestId = 0;
+let imageModalLoadTimer = null;
+let marketRefreshTimer;
+let marketRequestId = 0;
 
 function updateDraftArea() {{
   draftArea.classList.toggle('has-drafts', Boolean(draftArea.querySelector('.draft-row')));
@@ -665,6 +864,7 @@ function updateLiveTotal() {{
   if (!priceTiers.length || !totalCards) {{
     estimatedCost.textContent = '—';
     estimatedRate.textContent = priceTiers.length ? 'Add cards to estimate' : 'Pricing unavailable';
+    scheduleMarketTotal();
     return;
   }}
 
@@ -674,18 +874,232 @@ function updateLiveTotal() {{
   }}
   estimatedCost.textContent = currencyFormatter.format(totalCards * pricePerCard);
   estimatedRate.textContent = currencyFormatter.format(pricePerCard) + ' / card';
+  scheduleMarketTotal();
 }}
+
+function selectedMarketRows() {{
+  return Array.from(cardTable.querySelectorAll('.card-row[data-confirmed="true"]'))
+    .filter((row) => row.dataset.cancelled !== 'true')
+    .map((row) => {{
+      const selected = row.querySelector('input[type="radio"]:checked');
+      const option = selected ? selected.closest('.option') : null;
+      const quantityInput = row.querySelector('.quantity-input');
+      const quantity = Number.parseInt(quantityInput ? quantityInput.value : '0', 10);
+      if (!option || !Number.isFinite(quantity) || quantity < 1) return null;
+      const name = option.querySelector('strong');
+      const cardSet = option.querySelector('span');
+      return {{ name: name ? name.textContent : '', set: cardSet ? cardSet.textContent : '', quantity }};
+    }})
+    .filter((row) => row && row.name && row.set);
+}}
+
+function scheduleMarketTotal() {{
+  clearTimeout(marketRefreshTimer);
+  marketRefreshTimer = setTimeout(refreshMarketTotal, 300);
+}}
+
+async function refreshMarketTotal() {{
+  const rows = selectedMarketRows();
+  if (!rows.length) {{
+    marketCost.textContent = '—';
+    marketRate.textContent = 'Confirm cards to estimate';
+    return;
+  }}
+  const requestId = ++marketRequestId;
+  const session = new URLSearchParams(window.location.search).get('session');
+  const marketUrl = session ? '/market?session=' + encodeURIComponent(session) : '/market';
+  marketCost.textContent = 'Loading…';
+  marketRate.textContent = 'Fetching cached market prices';
+  try {{
+    const response = await fetch(marketUrl, {{
+      method: 'POST',
+      headers: {{ 'Content-Type': 'application/json' }},
+      body: JSON.stringify({{ rows }}),
+    }});
+    if (!response.ok) throw new Error('Market lookup failed with HTTP ' + response.status);
+    const result = await response.json();
+    if (requestId !== marketRequestId) return;
+    if (!result.available) {{
+      marketCost.textContent = 'Unavailable';
+      marketRate.textContent = result.message || 'No market price found';
+      return;
+    }}
+    marketCost.textContent = new Intl.NumberFormat('en-US', {{ style: 'currency', currency: result.currency }}).format(result.market_total);
+    marketRate.textContent = result.unavailable_count
+      ? result.matched_quantity + '/' + result.total_quantity + ' cards priced'
+      : result.source;
+  }} catch (error) {{
+    if (requestId !== marketRequestId) return;
+    marketCost.textContent = 'Unavailable';
+    marketRate.textContent = 'Market lookup failed';
+    console.warn('[mtg-autoproxy] Market price lookup failed.', error);
+  }}
+}}
+
+function updateThumbnailProgress() {{
+  const thumbnails = document.querySelectorAll('.option-thumbnail');
+  thumbnailProgress.textContent = readyThumbnailCount + ' of ' + thumbnails.length + ' ready';
+  if (readyThumbnailCount >= thumbnails.length) thumbnailLoader.hidden = true;
+}}
+
+function markThumbnailReady(image) {{
+  if (image.dataset.ready === 'true') return;
+  image.dataset.ready = 'true';
+  readyThumbnailCount += 1;
+  updateThumbnailProgress();
+}}
+
+function watchThumbnails() {{
+  const thumbnails = document.querySelectorAll('.option-thumbnail');
+  if (!thumbnails.length) {{ thumbnailLoader.hidden = true; return; }}
+  thumbnails.forEach((image) => {{
+    image.addEventListener('load', () => markThumbnailReady(image), {{ once: true }});
+    image.addEventListener('error', () => markThumbnailReady(image), {{ once: true }});
+    if (image.complete) markThumbnailReady(image);
+  }});
+  updateThumbnailProgress();
+}}
+
+function closeImageModal() {{
+  imageModalRequestId += 1;
+  clearTimeout(imageModalLoadTimer);
+  imageModalLoadTimer = null;
+  imageModal.hidden = true;
+  document.body.classList.remove('modal-open');
+  expandedImage.onerror = null;
+  expandedImage.removeAttribute('src');
+  expandedImage.removeAttribute('data-fallback');
+  if (imageModalReturnFocus) imageModalReturnFocus.focus();
+}}
+
+function reportClientWarning(message, source) {{
+  const session = new URLSearchParams(window.location.search).get('session');
+  if (!session) return;
+  fetch('/client-log?session=' + encodeURIComponent(session), {{
+    method: 'POST',
+    headers: {{ 'Content-Type': 'application/json' }},
+    body: JSON.stringify({{ event: 'full-image-load-failed', message, source }}),
+    keepalive: true,
+  }}).catch(() => {{}});
+}}
+
+function preloadFullImages(root) {{
+  root.querySelectorAll('.option-thumbnail').forEach((thumbnail) => {{
+    const source = thumbnail.dataset.fullImage;
+    if (!source || thumbnail.dataset.fullPreloadStarted === 'true') return;
+    thumbnail.dataset.fullPreloadStarted = 'true';
+    const fullImage = new Image();
+    fullImage.onload = () => {{ thumbnail.dataset.fullPreloadState = 'ready'; }};
+    fullImage.onerror = () => {{
+      thumbnail.dataset.fullPreloadState = 'failed';
+      const warning = 'Could not preload full embedded image; the cached thumbnail will be used.';
+      console.warn('[mtg-autoproxy] ' + warning, source);
+      reportClientWarning(warning, source);
+    }};
+    fullImage.src = source;
+  }});
+}}
+
+function openImageModal(image) {{
+  const source = image.dataset.fullImage || image.currentSrc || image.src;
+  if (!source) return;
+  const requestId = ++imageModalRequestId;
+  imageModalReturnFocus = image;
+  const fallback = image.dataset.localImage || image.currentSrc || image.src;
+  expandedImage.dataset.fallback = fallback;
+  expandedImage.onerror = () => {{
+    if (expandedImage.dataset.fallback && expandedImage.src !== expandedImage.dataset.fallback) {{
+      expandedImage.onerror = null;
+      expandedImage.src = expandedImage.dataset.fallback;
+    }}
+  }};
+  expandedImage.src = fallback;
+  expandedImage.alt = image.alt;
+  imageModalCaption.textContent = image.alt;
+  imageModal.hidden = false;
+  document.body.classList.add('modal-open');
+  imageModalClose.focus();
+  if (source !== fallback) {{
+    const remoteImage = new Image();
+    remoteImage.onload = () => {{
+      clearTimeout(imageModalLoadTimer);
+      imageModalLoadTimer = null;
+      if (requestId === imageModalRequestId && !imageModal.hidden) expandedImage.src = source;
+    }};
+    remoteImage.onerror = () => {{
+      clearTimeout(imageModalLoadTimer);
+      imageModalLoadTimer = null;
+      const warning = 'Could not load full embedded image; using the cached image instead.';
+      console.warn('[mtg-autoproxy] ' + warning, source);
+      reportClientWarning(warning, source);
+    }};
+    imageModalLoadTimer = setTimeout(() => {{
+      if (requestId !== imageModalRequestId || imageModal.hidden) return;
+      const warning = 'Timed out loading full embedded image; using the cached image instead.';
+      console.warn('[mtg-autoproxy] ' + warning, source);
+      reportClientWarning(warning, source);
+    }}, 10000);
+    remoteImage.src = source;
+  }}
+}}
+
+function bindThumbnailPreview(root) {{
+  root.querySelectorAll('.option-thumbnail').forEach((image) => {{
+    if (image.dataset.previewBound === 'true') return;
+    image.dataset.previewBound = 'true';
+    image.addEventListener('click', (event) => {{
+      event.preventDefault();
+      event.stopPropagation();
+      openImageModal(image);
+    }});
+    image.addEventListener('keydown', (event) => {{
+      if (event.key !== 'Enter' && event.key !== ' ') return;
+      event.preventDefault();
+      event.stopPropagation();
+      openImageModal(image);
+    }});
+  }});
+}}
+
+imageModalClose.addEventListener('click', closeImageModal);
+imageModal.addEventListener('click', (event) => {{
+  if (event.target === imageModal) closeImageModal();
+}});
+document.addEventListener('keydown', (event) => {{
+  if (event.key === 'Escape' && !imageModal.hidden) closeImageModal();
+}});
 
 searchInput.addEventListener('input', () => {{
   clearTimeout(searchTimer);
   const query = searchInput.value.trim();
-  if (query.length < 2) {{ suggestions.replaceChildren(); suggestions.style.display = 'none'; return; }}
+  if (query.length < 2) {{ suggestions.replaceChildren(); suggestions.dataset.query = ''; suggestions.style.display = 'none'; return; }}
   searchTimer = setTimeout(() => searchCatalog(query), 250);
 }});
 
+searchInput.addEventListener('keydown', (event) => {{
+  if (event.key !== 'Enter') return;
+  event.preventDefault();
+  clearTimeout(searchTimer);
+  const query = searchInput.value.trim();
+  if (query.length < 2) return;
+  const allVersionsButton = suggestions.dataset.query === query
+    ? suggestions.querySelector('.suggestion:first-child .suggestion-action.primary')
+    : null;
+  if (allVersionsButton) {{ allVersionsButton.click(); return; }}
+  searchCatalog(query).then(() => {{
+    const refreshedButton = suggestions.dataset.query === query
+      ? suggestions.querySelector('.suggestion:first-child .suggestion-action.primary')
+      : null;
+    if (refreshedButton) refreshedButton.click();
+  }});
+}});
+
 async function searchCatalog(query) {{
+  const requestId = ++searchRequestId;
   const response = await fetch('/search?q=' + encodeURIComponent(query));
   const results = await response.json();
+  if (requestId !== searchRequestId || searchInput.value.trim() !== query) return;
+  suggestions.dataset.query = query;
   suggestions.replaceChildren();
   const allSuggestion = document.createElement('div');
   allSuggestion.className = 'suggestion';
@@ -712,21 +1126,40 @@ async function searchCatalog(query) {{
     const name = document.createElement('strong'); name.textContent = result.name; text.append(name);
     const set = document.createElement('span'); set.textContent = result.card_set; text.append(set);
     suggestion.append(text);
-    const actions = document.createElement('div'); actions.className = 'suggestion-actions';
-    const chooseVersion = document.createElement('button');
-    chooseVersion.type = 'button'; chooseVersion.className = 'suggestion-action primary'; chooseVersion.textContent = 'Browse versions';
-    chooseVersion.addEventListener('click', () => addAllVersions(result, chooseVersion, query));
-    actions.append(chooseVersion); suggestion.append(actions);
+    suggestion.tabIndex = 0;
+    suggestion.setAttribute('role', 'button');
+    suggestion.setAttribute('aria-label', 'Choose versions for ' + result.name);
+    suggestion.addEventListener('click', () => addAllVersions(result, suggestion, query));
+    suggestion.addEventListener('keydown', (event) => {{
+      if (event.key !== 'Enter' && event.key !== ' ') return;
+      event.preventDefault();
+      addAllVersions(result, suggestion, query);
+    }});
     suggestions.append(suggestion);
   }}
   suggestions.style.display = results.length ? 'block' : 'none';
 }}
 
-async function addAllVersions(result, button, query) {{
-  button.disabled = true; button.textContent = 'Loading...';
-  const response = await fetch('/versions?q=' + encodeURIComponent(query));
-  const versions = await response.json();
-  addSearchCard(result, versions);
+async function addAllVersions(result, trigger, query) {{
+  if (trigger.getAttribute('aria-busy') === 'true') return;
+  trigger.setAttribute('aria-busy', 'true');
+  if (trigger.tagName === 'BUTTON') {{
+    trigger.disabled = true;
+    trigger.textContent = 'Loading...';
+  }} else {{
+    trigger.classList.add('is-loading');
+  }}
+  try {{
+    const response = await fetch('/versions?q=' + encodeURIComponent(query));
+    if (!response.ok) throw new Error('Version lookup failed with HTTP ' + response.status);
+    const versions = await response.json();
+    addSearchCard(result, versions);
+  }} catch (error) {{
+    console.error('[mtg-autoproxy] Could not load card versions.', error);
+    trigger.removeAttribute('aria-busy');
+    trigger.classList.remove('is-loading');
+    if (trigger.tagName === 'BUTTON') trigger.disabled = false;
+  }}
 }}
 
 function addSearchCard(result, versions) {{
@@ -746,14 +1179,26 @@ function addSearchCard(result, versions) {{
     const radio = document.createElement('input'); radio.type = 'radio'; radio.name = 'additional-version-' + draftId;
     radio.value = version.id; radio.dataset.cardId = version.id;
     const image = version.image_path ? document.createElement('img') : document.createElement('div');
-    image.className = version.image_path ? '' : 'missing-image';
-    if (version.image_path) {{ image.src = version.image_path; image.alt = version.name; }} else {{ image.textContent = 'Image unavailable'; }}
+    image.className = version.image_path ? 'option-thumbnail' : 'missing-image';
+    if (version.image_path) {{
+      image.src = version.image_path;
+      image.alt = version.name;
+      image.dataset.fullImage = version.image_full_url || version.image_path;
+      image.dataset.localImage = version.image_path;
+      image.tabIndex = 0;
+      image.setAttribute('role', 'button');
+      image.setAttribute('aria-label', 'Expand ' + version.name);
+      image.loading = 'eager';
+      image.decoding = 'async';
+    }} else {{ image.textContent = 'Image unavailable'; }}
     const name = document.createElement('strong'); name.textContent = version.name;
     const set = document.createElement('span'); set.textContent = version.card_set;
     option.append(radio, image, name, set); options.append(option);
   }});
   draftArea.append(row); suggestions.replaceChildren(); suggestions.style.display = 'none'; searchInput.value = '';
   bindRow(row);
+  bindThumbnailPreview(row);
+  preloadFullImages(row);
   updateDraftArea();
 }}
 
@@ -825,6 +1270,9 @@ document.querySelectorAll('.card-row').forEach(bindRow);
 updateDraftArea();
 updateConfirmedCount();
 updateLiveTotal();
+watchThumbnails();
+bindThumbnailPreview(document);
+preloadFullImages(document);
 </script>
 </body>
 </html>""", image_ids
@@ -841,6 +1289,7 @@ updateLiveTotal();
         completed,
         session_store=None,
         session_id=None,
+        prefetcher=None,
     ):
         if session_id:
             page = page.replace(
@@ -864,6 +1313,8 @@ updateLiveTotal();
 
         class SelectionHandler(BaseHTTPRequestHandler):
             def do_GET(self):
+                if prefetcher:
+                    prefetcher.note_activity()
                 parsed_url = urlparse(self.path)
                 query = parse_qs(parsed_url.query)
                 if parsed_url.path in {"/select", "/finish", "/cancel"} and not self._session_matches(query):
@@ -892,8 +1343,10 @@ updateLiveTotal();
                 self._respond_html(page)
 
             def do_POST(self):
+                if prefetcher:
+                    prefetcher.note_activity()
                 parsed_url = urlparse(self.path)
-                if parsed_url.path != "/select":
+                if parsed_url.path not in {"/select", "/client-log", "/market"}:
                     self.send_error(405, "Method not allowed")
                     return
 
@@ -902,12 +1355,31 @@ updateLiveTotal();
                 except ValueError:
                     self.send_error(400, "Invalid request body")
                     return
-                if content_length > MAX_SELECTION_BODY_BYTES:
+                body_limit = (
+                    MAX_CLIENT_LOG_BYTES
+                    if parsed_url.path == "/client-log"
+                    else MAX_MARKET_BODY_BYTES
+                    if parsed_url.path == "/market"
+                    else MAX_SELECTION_BODY_BYTES
+                )
+                if content_length > body_limit:
                     self.send_error(413, "Selection request is too large")
                     return
 
                 body = self.rfile.read(content_length)
                 query = parse_qs(parsed_url.query)
+                if parsed_url.path == "/market":
+                    if not self._session_matches(query):
+                        self.send_error(403, "Invalid selection session")
+                        return
+                    self._market_estimate(body)
+                    return
+                if parsed_url.path == "/client-log":
+                    if not self._session_matches(query):
+                        self.send_error(403, "Invalid selection session")
+                        return
+                    self._log_client_warning(body)
+                    return
                 for key, values in parse_qs(
                     body.decode("utf-8", errors="replace")
                 ).items():
@@ -917,9 +1389,61 @@ updateLiveTotal();
                     return
                 self._save_selections(query)
 
+            def _market_estimate(self, body):
+                if not selector.market_provider:
+                    self._respond_json({"available": False, "message": "Market pricing is disabled"})
+                    return
+                try:
+                    payload = json.loads(body.decode("utf-8"))
+                    raw_rows = payload.get("rows") if isinstance(payload, dict) else None
+                    if not isinstance(raw_rows, list) or len(raw_rows) > 100:
+                        raise ValueError("Invalid market rows")
+                    rows = []
+                    for raw_row in raw_rows:
+                        if not isinstance(raw_row, dict):
+                            raise ValueError("Invalid market row")
+                        name = str(raw_row.get("name", ""))[:200].strip()
+                        card_set = str(raw_row.get("set", ""))[:200].strip()
+                        quantity = int(raw_row.get("quantity", 0))
+                        if not name or not card_set or quantity < 1 or quantity > 100000:
+                            raise ValueError("Invalid market row values")
+                        rows.append((name, card_set, quantity))
+                    estimate = selector.market_provider.estimate_rows(rows)
+                except (UnicodeDecodeError, json.JSONDecodeError, TypeError, ValueError) as error:
+                    self.send_error(400, str(error))
+                    return
+                self._respond_json(
+                    {
+                        "available": estimate.available,
+                        "currency": estimate.currency,
+                        "market_total": estimate.market_total,
+                        "matched_quantity": estimate.matched_quantity,
+                        "total_quantity": estimate.total_quantity,
+                        "unavailable_count": len(estimate.unavailable),
+                        "source": estimate.source,
+                        "message": estimate.unavailable[0] if estimate.unavailable else "",
+                    }
+                )
+
             @staticmethod
             def _session_matches(query):
                 return not session_id or query.get("session", [""])[0] == session_id
+
+            def _log_client_warning(self, body):
+                try:
+                    payload = json.loads(body.decode("utf-8"))
+                except (UnicodeDecodeError, json.JSONDecodeError):
+                    self.send_error(400, "Invalid client log")
+                    return
+                if not isinstance(payload, dict) or payload.get("event") != "full-image-load-failed":
+                    self.send_error(400, "Invalid client log event")
+                    return
+                message = str(payload.get("message", "client image warning"))[:500]
+                source = str(payload.get("source", "unknown source"))[:500]
+                logger.warning("Browser picker warning: %s Source: %s", message, source)
+                self.send_response(204)
+                self.send_header("Cache-Control", "no-store")
+                self.end_headers()
 
             def _search_catalog(self, query):
                 if len(query) > MAX_SEARCH_QUERY_LENGTH:
@@ -955,6 +1479,18 @@ updateLiveTotal();
                     result["image_path"] = (
                         f"/images/{image_id}" if image_id is not None else None
                     )
+                    image = image_data_by_id.get(image_id)
+                    result["image_full_url"] = (
+                        google_full_image_url(image[2])
+                        if image and len(image) > 2
+                        else result["image_path"]
+                    )
+                    if result["image_url"] and result["image_path"] is None:
+                        logger.warning(
+                            "Full image unavailable for search result '%s' from %s.",
+                            result["name"],
+                            result["image_url"],
+                        )
                 return results
 
             def _serve_image(self, path):
@@ -962,7 +1498,7 @@ updateLiveTotal();
                 if not image_id.isdigit() or int(image_id) not in image_data_by_id:
                     self.send_error(404)
                     return
-                image, content_type = image_data_by_id[int(image_id)]
+                image, content_type, _ = image_data_by_id[int(image_id)]
                 self.send_response(200)
                 self.send_header("Content-Type", content_type)
                 self.send_header("Content-Length", str(len(image)))
@@ -1015,7 +1551,10 @@ updateLiveTotal();
                         self._recap_html(selected_rows, skipped_rows)
                     )
                 finally:
-                    completed.set()
+                    logger.info(
+                        "Selection recap is ready; keeping session %s alive for editing or finalization.",
+                        session_id,
+                    )
 
             def _finish_session(self):
                 if session_store and session_id:
@@ -1051,12 +1590,21 @@ main { margin: auto; max-width: 620px; } p { color: #9ca99f; }
 
             def _recap_html(self, selected_rows, skipped_rows, finished=False):
                 total_quantity = sum(quantity for _, _, quantity in selected_rows)
+                market_estimate = None
+                if selector.market_provider:
+                    market_estimate = selector.market_provider.estimate_rows(
+                        [
+                            (candidate.name, candidate.card_set, quantity)
+                            for _, candidate, quantity in selected_rows
+                        ],
+                        vendor_total=selector._vendor_total_for_rows(selected_rows),
+                    )
                 table_rows = []
                 for requested_name, candidate, quantity in selected_rows:
                     image_id = image_ids.get(candidate.image_url)
                     image = image_data_by_id.get(image_id)
                     if image:
-                        image_bytes, content_type = image
+                        image_bytes, content_type, _ = image
                         image_markup = (
                             f'<img class="recap-image" src="data:{content_type};base64,'
                             f'{base64.b64encode(image_bytes).decode("ascii")}" '
@@ -1088,6 +1636,46 @@ main { margin: auto; max-width: 620px; } p { color: #9ca99f; }
                         '<a class="finish" href="/finish">Finish order</a>'
                         '<a class="cancel" href="/cancel">Cancel session</a>'
                     )
+                market_markup = ""
+                if market_estimate:
+                    if market_estimate.available:
+                        saving_markup = ""
+                        if market_estimate.saving is not None:
+                            saving_markup = (
+                                f'<span>Estimated difference: {escape(market_estimate.currency)} '
+                                f'{market_estimate.saving:.2f}'
+                                + (
+                                    f' ({market_estimate.saving_percent:.1f}%)'
+                                    if market_estimate.saving_percent is not None
+                                    else ""
+                                )
+                                + "</span>"
+                            )
+                        elif market_estimate.vendor_total is not None:
+                            saving_markup = (
+                                f'<span>Vendor total: {escape(market_estimate.vendor_currency)} '
+                                f'{market_estimate.vendor_total:.2f}; configure currency conversion '
+                                "to estimate saving</span>"
+                            )
+                        partial_markup = ""
+                        if market_estimate.unavailable:
+                            partial_markup = (
+                                f'<small>{len(market_estimate.unavailable)} line(s) could not be priced</small>'
+                            )
+                        market_markup = (
+                            '<div class="market-comparison">'
+                            f'<strong>Market benchmark: {escape(market_estimate.currency)} '
+                            f'{market_estimate.market_total:.2f}</strong>'
+                            f'<span>Source: {escape(market_estimate.source)}</span>'
+                            f'{saving_markup}{partial_markup}</div>'
+                        )
+                    else:
+                        reason = market_estimate.unavailable[0] if market_estimate.unavailable else "No data"
+                        market_markup = (
+                            '<div class="market-comparison unavailable">'
+                            f'<strong>Market comparison unavailable</strong>'
+                            f'<span>{escape(reason)}</span></div>'
+                        )
                 return f"""<!doctype html>
 <html lang="en">
 <head>
@@ -1105,6 +1693,10 @@ h1 {{ font-size: clamp(1.8rem, 4vw, 2.8rem); letter-spacing: -.045em; line-heigh
 .summary-bar {{ align-items: center; background: var(--surface-raised); border-bottom: 1px solid var(--border); display: flex; gap: 12px; justify-content: space-between; padding: 18px 20px; }}
 .summary-bar strong {{ color: var(--success); font-size: 1.2rem; }}
 .summary-bar span {{ color: var(--muted); font-size: .82rem; }}
+.market-comparison {{ background: var(--surface); border-bottom: 1px solid var(--border); display: flex; flex-wrap: wrap; gap: 8px 18px; padding: 13px 20px; }}
+.market-comparison strong {{ color: var(--success); font-size: .92rem; }}
+.market-comparison span, .market-comparison small {{ color: var(--muted); font-size: .78rem; }}
+.market-comparison.unavailable strong {{ color: #f0c66b; }}
 .table-wrap {{ overflow-x: auto; }}
 table {{ border-collapse: collapse; min-width: 760px; width: 100%; }}
 th {{ color: var(--muted); font-size: .7rem; letter-spacing: .08em; text-align: left; text-transform: uppercase; }}
@@ -1132,6 +1724,7 @@ button {{ background: var(--accent); border: 0; border-radius: 8px; color: #2436
 <p class="lead">Review the versions and quantities selected for this order.</p>
 <section class="summary-card">
 <div class="summary-bar"><span>{len(selected_rows)} selected line(s)</span><strong>{total_quantity} total card(s)</strong></div>
+{market_markup}
 <div class="table-wrap"><table><thead><tr><th>Preview</th><th>Requested</th><th>Selected version</th><th>Set</th><th>Qty</th></tr></thead><tbody>{"".join(table_rows)}</tbody></table></div>
 {skipped_markup}
 <div class="actions">{action_markup}<button type="button" onclick="window.print()">Print recap</button></div>

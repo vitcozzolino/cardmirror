@@ -8,8 +8,10 @@ from pathlib import Path
 import jellyfish
 import requests
 
+from cardmarket import CardmarketPriceProvider
 import config
 from selector import CardSelector
+from scryfall import ScryfallPriceProvider
 from utils import (
     CardCandidate,
     CardOrder,
@@ -173,7 +175,7 @@ def process_cards(
         add_to_order(selected, quantity, set_counters, to_order)
 
 
-def write_output(to_order, missing):
+def write_output(to_order, missing, market_estimate=None):
     output_directory = Path(config.OUTPUT_DIRECTORY)
     output_directory.mkdir(parents=True, exist_ok=True)
 
@@ -199,6 +201,28 @@ def write_output(to_order, missing):
                 f"| {markdown_cell(item.name)} | {markdown_cell(item.set)} | "
                 f"{item.quantity} |\n"
             )
+        if market_estimate and market_estimate.available:
+            f.write("\n## Market comparison\n\n")
+            f.write(
+                f"- Market benchmark: {market_estimate.currency} "
+                f"{market_estimate.market_total:.2f}\n"
+            )
+            if market_estimate.vendor_total is not None and market_estimate.saving is not None:
+                f.write(
+                    f"- Estimated difference: {market_estimate.currency} "
+                    f"{market_estimate.saving:.2f}\n"
+                )
+            elif market_estimate.vendor_total is not None:
+                f.write(
+                    f"- Vendor total: {market_estimate.vendor_currency} "
+                    f"{market_estimate.vendor_total:.2f}\n"
+                )
+                f.write("- Estimated difference: configure a currency conversion rate\n")
+            f.write(f"- Source: {markdown_cell(market_estimate.source)}\n")
+            if market_estimate.unavailable:
+                f.write(
+                    f"- Unpriced cards: {len(market_estimate.unavailable)}\n"
+                )
 
     with open(output_directory / "missing.md", "w", encoding="utf-8") as f:
         f.write("# Missing or Skipped Cards\n\n")
@@ -219,11 +243,10 @@ def csv_cell(value):
     return text
 
 
-def estimate_cost(to_order, price_tiers=None):
+def vendor_cost(to_order, price_tiers=None):
     total_cards = sum(int(item.quantity) for item in to_order)
     if not total_cards:
-        logger.info("No cards found, so no price estimate was calculated.")
-        return
+        return None
 
     try:
         if price_tiers is None:
@@ -238,15 +261,28 @@ def estimate_cost(to_order, price_tiers=None):
         price_per_card = applicable_tiers[-1]
     except (requests.RequestException, ValueError) as error:
         logger.warning("Could not calculate the vendor price: %s", error)
-        return
+        return None
 
-    cost = total_cards * price_per_card
+    return {
+        "total_cards": total_cards,
+        "price_per_card": price_per_card,
+        "total": total_cards * price_per_card,
+    }
+
+
+def estimate_cost(to_order, price_tiers=None):
+    estimate = vendor_cost(to_order, price_tiers)
+    if not estimate:
+        logger.info("No cards found, so no price estimate was calculated.")
+        return None
+
     logger.info(
         "Estimated single-card cost for %d cards at $%.2f/card, excluding delivery: $%.2f",
-        total_cards,
-        price_per_card,
-        cost,
+        estimate["total_cards"],
+        estimate["price_per_card"],
+        estimate["total"],
     )
+    return estimate
 
 
 def main():
@@ -280,6 +316,35 @@ def main():
     set_counters = {}
     card_selector = None
     price_tiers = None
+    market_provider = None
+    if config.MARKET_PRICE_PROVIDER == "scryfall" and config.SCRYFALL_ENABLED:
+        market_provider = ScryfallPriceProvider(
+            cache_path=config.SCRYFALL_CACHE_PATH,
+            cache_hours=config.SCRYFALL_CACHE_HOURS,
+            vendor_currency=config.MARKET_VENDOR_CURRENCY,
+            vendor_to_market_rate=config.MARKET_VENDOR_TO_EUR_RATE,
+            foil_mode=config.SCRYFALL_FOIL_MODE,
+        )
+    elif config.MARKET_PRICE_PROVIDER == "cardmarket" and config.CARDMARKET_ENABLED:
+        market_provider = CardmarketPriceProvider(
+            cache_path=config.CARDMARKET_CACHE_PATH,
+            api_base_url=config.CARDMARKET_API_BASE_URL,
+            price_guide_base_url=config.CARDMARKET_PRICE_GUIDE_BASE_URL,
+            price_source=config.CARDMARKET_PRICE_SOURCE,
+            price_guide_fallback=config.CARDMARKET_PRICE_GUIDE_FALLBACK,
+            article_cache_minutes=config.CARDMARKET_ARTICLE_CACHE_MINUTES,
+            price_guide_cache_hours=config.CARDMARKET_PRICE_GUIDE_CACHE_HOURS,
+            product_cache_days=config.CARDMARKET_PRODUCT_CACHE_DAYS,
+            language_id=config.CARDMARKET_LANGUAGE_ID,
+            min_condition=config.CARDMARKET_MIN_CONDITION,
+            foil=config.CARDMARKET_FOIL,
+            price_guide_field=config.CARDMARKET_PRICE_GUIDE_FIELD,
+            currency=config.CARDMARKET_CURRENCY,
+            vendor_currency=config.CARDMARKET_VENDOR_CURRENCY,
+            vendor_to_market_rate=config.CARDMARKET_VENDOR_TO_MARKET_RATE,
+        )
+    if market_provider and not market_provider.configured:
+        logger.info("Market comparison provider is not configured.")
 
     if config.ENABLE_IMAGE_SELECTION:
         try:
@@ -287,12 +352,16 @@ def main():
         except (requests.RequestException, ValueError) as error:
             logger.warning("Live price estimate unavailable: %s", error)
         card_selector = CardSelector(
-            config.CATALOG_CACHE_PATH,
-            config.THUMBNAIL_CACHE_DIRECTORY,
-            config.THUMBNAIL_CACHE_MAX_AGE_DAYS,
-            config.THUMBNAIL_CACHE_MAX_SIZE_MB,
-            config.SELECTION_SESSION_DATABASE_PATH,
-            price_tiers,
+            catalog_cache_path=config.CATALOG_CACHE_PATH,
+            thumbnail_cache_directory=config.THUMBNAIL_CACHE_DIRECTORY,
+            thumbnail_cache_max_age_days=config.THUMBNAIL_CACHE_MAX_AGE_DAYS,
+            thumbnail_cache_max_size_mb=config.THUMBNAIL_CACHE_MAX_SIZE_MB,
+            session_database_path=config.SELECTION_SESSION_DATABASE_PATH,
+            price_tiers=price_tiers,
+            market_provider=market_provider,
+            thumbnail_prefetch_enabled=config.THUMBNAIL_PREFETCH_ENABLED,
+            thumbnail_prefetch_workers=config.THUMBNAIL_PREFETCH_WORKERS,
+            thumbnail_prefetch_idle_seconds=config.THUMBNAIL_PREFETCH_IDLE_SECONDS,
         )
 
     process_cards(
@@ -308,8 +377,36 @@ def main():
     logger.info("Total Missing Cards: %d", len(missing))
     logger.info(set_counters)
 
-    write_output(to_order, missing)
-    estimate_cost(to_order, price_tiers)
+    vendor_estimate = estimate_cost(to_order, price_tiers)
+    market_estimate = None
+    if market_provider:
+        vendor_total = vendor_estimate["total"] if vendor_estimate else None
+        market_estimate = market_provider.estimate_orders(to_order, vendor_total)
+        if market_estimate.available:
+            logger.info(
+                "Market benchmark: %s %.2f%s",
+                market_estimate.currency,
+                market_estimate.market_total,
+                (
+                    f"; estimated difference: {market_estimate.currency} "
+                    f"{market_estimate.saving:.2f}"
+                    f" ({market_estimate.saving_percent:.1f}%)"
+                    if market_estimate.saving is not None
+                    else "; saving comparison needs a configured currency conversion rate"
+                ),
+            )
+            if market_estimate.unavailable:
+                logger.warning(
+                "Market provider could not price %d card line(s).",
+                    len(market_estimate.unavailable),
+                )
+        elif market_estimate.unavailable and market_provider.configured:
+            logger.warning(
+                "Market comparison unavailable: %s",
+                "; ".join(market_estimate.unavailable[:3]),
+            )
+
+    write_output(to_order, missing, market_estimate)
 
     et = time.process_time()
     logger.debug("CPU Execution time: %s seconds", et - st)

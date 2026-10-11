@@ -13,12 +13,22 @@ against a local wanted-card JSON file. Each entry needs a `name` and optional
 The estimated total uses the vendor's live single-card quantity tiers and excludes
 delivery costs.
 
+The picker recap and generated `output/order.md` also show an optional market
+comparison. The default Scryfall backend matches the selected printing and uses
+its EUR price, cached locally for 24 hours. The comparison is an estimate of the
+cost of equivalent originals, not a guaranteed saving on the proxy order. Delivery
+is excluded; a saving percentage is shown only after a vendor-to-EUR conversion
+rate is configured.
+
 The picker shows the same live estimate in the top-right of the order table. It
 recalculates from active row quantities as cards are confirmed, edited, or cancelled.
 
 Card matching searches the vendor's singles, regular, holo, and foil tabs. Names
 are normalized before comparison, so punctuation and alternate names in parentheses
 do not hide available versions.
+
+Autocomplete shows only catalog entries containing the exact normalized card-name
+phrase when one exists; otherwise it falls back to broader matches.
 
 The vendor workbook is mirrored into `output/vendor_catalog.sqlite3` on each
 successful refresh. This speeds up interactive search and lets matching continue
@@ -29,6 +39,12 @@ blob store and SQLite metadata. Cached images are reused immediately; older entr
 are revalidated with HTTP cache validators and the cache is bounded to avoid growing
 without limit.
 
+After the picker has been idle for a short period, a pair of background workers
+opportunistically warms the cache for the remaining catalog thumbnails. Any browser
+request pauses new prefetch work, so interactive searches remain responsive. Tune or
+disable this with `THUMBNAIL_PREFETCH_ENABLED`, `THUMBNAIL_PREFETCH_WORKERS`, and
+`THUMBNAIL_PREFETCH_IDLE_SECONDS` in `config.py`.
+
 Set `REFRESH_CATALOG_CACHE_ON_RUN` to `False` in `config.py` to run solely from
 the complete local catalog mirror. Leave it as `True` to refresh the mirror before
 each run, then load the refreshed database for matching and interactive search.
@@ -38,6 +54,9 @@ in parallel, then opens one local browser page. Each requested card is a row of
 thumbnails; choose one option in every row and save the selections to write them
 to `output/order.csv`. Set `ENABLE_IMAGE_SELECTION` to `False` in `config.py` to
 use automatic matching without the picker.
+
+Click a thumbnail to open the original embedded image URL from the vendor link in
+an enlarged preview.
 
 The picker also has a top-level catalog search. Search results identify a card, and
 `Choose version` opens every matching set/version without preselecting anything.
@@ -80,11 +99,27 @@ Finally, MTG Autoproxy is not fail proof! Always double check the output before 
    5. `FUZZY_MATCH_THRESHOLD`: increase this value (maximum `1.0`) to make fuzzy matching more strict.
    6. `THUMBNAIL_CACHE_MAX_AGE_DAYS` and `THUMBNAIL_CACHE_MAX_SIZE_MB`: control
       thumbnail revalidation and the local cache size.
+   7. `THUMBNAIL_PREFETCH_ENABLED`, `THUMBNAIL_PREFETCH_WORKERS`, and
+      `THUMBNAIL_PREFETCH_IDLE_SECONDS`: control opportunistic idle-time warming of
+      uncached catalog thumbnails.
+   8. `MARKET_PRICE_PROVIDER`: use `scryfall` by default, or `cardmarket` only
+      when you have approved Cardmarket API access.
+   9. `SCRYFALL_CACHE_HOURS` and `SCRYFALL_FOIL_MODE`: control Scryfall price
+      caching and normal/foil price selection.
+   10. `MARKET_VENDOR_TO_EUR_RATE`: optional conversion rate used to compare the
+       vendor's USD total with the Scryfall EUR total.
 
    The Black Lotus catalog and pricing URLs are kept in a separate section. Leave
    them unchanged unless the vendor restructures its public spreadsheet.
 4. Run `uv run main.py`.
 5. Check `output/order.md` for the Markdown order table. `output/order.csv` remains available for vendor ordering.
+
+Scryfall requires no credentials. Its cache is stored in
+`output/scryfall_cache.sqlite3`; delete that file to force a complete market-data
+refresh. Keep API requests cached and below Scryfall's published rate limits.
+
+For development, run `uv run dev.py`. It watches Python source files and restarts
+the application after changes; press `Ctrl+C` to stop it.
 
 # Planned Improvements
 

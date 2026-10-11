@@ -219,13 +219,45 @@ def load_vendor_catalog_cache(cache_path):
     )
 
 
+def load_vendor_catalog_image_urls(cache_path):
+    with sqlite3.connect(cache_path) as connection:
+        rows = connection.execute(
+            """
+            SELECT DISTINCT image_url
+            FROM catalog_cards
+            WHERE image_url IS NOT NULL AND TRIM(image_url) <> ''
+            ORDER BY image_url
+            """
+        ).fetchall()
+
+    return [image_url for (image_url,) in rows]
+
+
 def search_vendor_catalog_cache(cache_path, query, limit=30):
     normalized_query = normalize_catalog_name(query)
     if not normalized_query:
         return []
 
     with sqlite3.connect(cache_path) as connection:
-        rows = connection.execute(
+        exact_rows = connection.execute(
+            """
+            SELECT catalog_cards.id, catalog_cards.card_name,
+                   catalog_cards.normalized_name, catalog_cards.card_set,
+                   catalog_cards.image_url
+            FROM catalog_cards
+            INNER JOIN (
+                SELECT normalized_name, MIN(id) AS id
+                FROM catalog_cards
+                WHERE normalized_name = ?
+                   OR instr(' ' || normalized_name || ' ', ' ' || ? || ' ') > 0
+                GROUP BY normalized_name
+            ) AS first_matches ON catalog_cards.id = first_matches.id
+            ORDER BY catalog_cards.normalized_name, card_set
+            LIMIT ?
+            """,
+            (normalized_query, normalized_query, limit),
+        ).fetchall()
+        rows = exact_rows or connection.execute(
             """
             SELECT catalog_cards.id, catalog_cards.card_name,
                    catalog_cards.normalized_name, catalog_cards.card_set,
@@ -261,7 +293,18 @@ def search_vendor_catalog_versions(cache_path, query, limit=200):
         return []
 
     with sqlite3.connect(cache_path) as connection:
-        rows = connection.execute(
+        exact_rows = connection.execute(
+            """
+            SELECT id, card_name, normalized_name, card_set, image_url
+            FROM catalog_cards
+            WHERE normalized_name = ?
+               OR instr(' ' || normalized_name || ' ', ' ' || ? || ' ') > 0
+            ORDER BY card_set, card_name, id
+            LIMIT ?
+            """,
+            (normalized_query, normalized_query, limit),
+        ).fetchall()
+        rows = exact_rows or connection.execute(
             """
             SELECT id, card_name, normalized_name, card_set, image_url
             FROM catalog_cards
