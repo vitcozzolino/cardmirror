@@ -1,12 +1,14 @@
-import time
+import csv
 import logging
-from pathlib import Path
 import re
+import time
 import unicodedata
-import config
+from pathlib import Path
+
 import jellyfish
 import requests
 
+import config
 from selector import CardSelector
 from utils import (
     CardCandidate,
@@ -17,6 +19,8 @@ from utils import (
     load_wanted_cards,
     sync_vendor_catalog_cache,
 )
+
+logger = logging.getLogger(__name__)
 
 
 def setup_logging():
@@ -101,7 +105,7 @@ def find_card_candidates(card_name, vendor_cards, image_links):
 
 
 def add_to_order(candidate, quantity, set_counters, to_order):
-    logging.debug("Selected %s from %s", candidate.name, candidate.card_set)
+    logger.debug("Selected %s from %s", candidate.name, candidate.card_set)
     to_order.append(CardOrder(candidate.name, candidate.card_set, quantity))
     set_counters[candidate.card_set] = (
         set_counters.get(candidate.card_set, 0) + int(quantity)
@@ -146,13 +150,20 @@ def process_cards(
         return
 
     try:
-        selections, additional_selections = card_selector.select_all(selection_requests)
+        selections, selection_quantities, additional_selections = card_selector.select_all(
+            selection_requests
+        )
     except RuntimeError as error:
-        logging.warning("Image selector unavailable: %s", error)
+        logger.warning("Image selector unavailable: %s", error)
         selections = [candidates[0] for _, _, candidates in selection_requests]
+        selection_quantities = [quantity for _, quantity, _ in selection_requests]
         additional_selections = []
 
-    for (wanted, quantity, _), selected in zip(selection_requests, selections):
+    for (wanted, _, _), selected, quantity in zip(
+        selection_requests,
+        selections,
+        selection_quantities,
+    ):
         if not selected:
             missing.append(wanted)
             continue
@@ -166,10 +177,13 @@ def write_output(to_order, missing):
     output_directory = Path(config.OUTPUT_DIRECTORY)
     output_directory.mkdir(parents=True, exist_ok=True)
 
-    with open(output_directory / "order.csv", "w", newline="") as f:
-        f.write("Card Name|Set|Quantity\n")
+    with open(output_directory / "order.csv", "w", newline="", encoding="utf-8") as f:
+        writer = csv.writer(f, delimiter="|", lineterminator="\n")
+        writer.writerow(["Card Name", "Set", "Quantity"])
         for item in to_order:
-            f.write(f"{item}\n")
+            writer.writerow(
+                [csv_cell(item.name), csv_cell(item.set), item.quantity]
+            )
 
     with open(output_directory / "missing.txt", "w", newline="") as f:
         f.write("--- MISSING CARDS ---\n")
@@ -198,14 +212,22 @@ def markdown_cell(value):
     return str(value).replace("\\", "\\\\").replace("|", "\\|").replace("\n", " ")
 
 
-def estimate_cost(to_order):
+def csv_cell(value):
+    text = str(value)
+    if text.startswith(("=", "+", "-", "@")):
+        return "'" + text
+    return text
+
+
+def estimate_cost(to_order, price_tiers=None):
     total_cards = sum(int(item.quantity) for item in to_order)
     if not total_cards:
-        logging.info("No cards found, so no price estimate was calculated.")
+        logger.info("No cards found, so no price estimate was calculated.")
         return
 
     try:
-        price_tiers = load_vendor_price_tiers(config.PRICING_URL)
+        if price_tiers is None:
+            price_tiers = load_vendor_price_tiers(config.PRICING_URL)
         applicable_tiers = [
             price
             for minimum_quantity, price in price_tiers
@@ -215,11 +237,11 @@ def estimate_cost(to_order):
             raise ValueError(f"No price tier covers an order of {total_cards} cards")
         price_per_card = applicable_tiers[-1]
     except (requests.RequestException, ValueError) as error:
-        logging.warning("Could not calculate the vendor price: %s", error)
+        logger.warning("Could not calculate the vendor price: %s", error)
         return
 
     cost = total_cards * price_per_card
-    logging.info(
+    logger.info(
         "Estimated single-card cost for %d cards at $%.2f/card, excluding delivery: $%.2f",
         total_cards,
         price_per_card,
@@ -245,21 +267,33 @@ def main():
                 fresh_vendor_cards,
                 fresh_image_links,
             )
-            logging.info("Refreshed %d vendor card entries in the local cache.", cached_cards)
+            logger.info("Refreshed %d vendor card entries in the local cache.", cached_cards)
         except (OSError, requests.RequestException, ValueError) as error:
-            logging.warning("Could not refresh vendor catalog: %s", error)
-            logging.info("Using the local vendor catalog cache.")
+            logger.warning("Could not refresh vendor catalog: %s", error)
+            logger.info("Using the local vendor catalog cache.")
     else:
-        logging.info("Using the local vendor catalog cache without refreshing it.")
+        logger.info("Using the local vendor catalog cache without refreshing it.")
 
     vendor_cards, image_links = load_vendor_catalog_cache(config.CATALOG_CACHE_PATH)
     to_order = []
     missing = []
     set_counters = {}
     card_selector = None
+    price_tiers = None
 
     if config.ENABLE_IMAGE_SELECTION:
-        card_selector = CardSelector(config.CATALOG_CACHE_PATH)
+        try:
+            price_tiers = load_vendor_price_tiers(config.PRICING_URL)
+        except (requests.RequestException, ValueError) as error:
+            logger.warning("Live price estimate unavailable: %s", error)
+        card_selector = CardSelector(
+            config.CATALOG_CACHE_PATH,
+            config.THUMBNAIL_CACHE_DIRECTORY,
+            config.THUMBNAIL_CACHE_MAX_AGE_DAYS,
+            config.THUMBNAIL_CACHE_MAX_SIZE_MB,
+            config.SELECTION_SESSION_DATABASE_PATH,
+            price_tiers,
+        )
 
     process_cards(
         wanted_cards,
@@ -271,15 +305,15 @@ def main():
         card_selector,
     )
 
-    logging.info(f"Total Missing Cards: {len(missing)}")
-    logging.info(set_counters)
+    logger.info("Total Missing Cards: %d", len(missing))
+    logger.info(set_counters)
 
     write_output(to_order, missing)
-    estimate_cost(to_order)
+    estimate_cost(to_order, price_tiers)
 
     et = time.process_time()
-    logging.debug(f"CPU Execution time: {et - st} seconds")
-    logging.info("Done!")
+    logger.debug("CPU Execution time: %s seconds", et - st)
+    logger.info("Done!")
 
 
 if __name__ == "__main__":

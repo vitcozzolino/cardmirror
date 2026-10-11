@@ -13,6 +13,9 @@ against a local wanted-card JSON file. Each entry needs a `name` and optional
 The estimated total uses the vendor's live single-card quantity tiers and excludes
 delivery costs.
 
+The picker shows the same live estimate in the top-right of the order table. It
+recalculates from active row quantities as cards are confirmed, edited, or cancelled.
+
 Card matching searches the vendor's singles, regular, holo, and foil tabs. Names
 are normalized before comparison, so punctuation and alternate names in parentheses
 do not hide available versions.
@@ -20,6 +23,11 @@ do not hide available versions.
 The vendor workbook is mirrored into `output/vendor_catalog.sqlite3` on each
 successful refresh. This speeds up interactive search and lets matching continue
 from the most recent cache when the vendor workbook is unavailable.
+
+Picker thumbnails are stored in `output/thumbnail_cache` using a content-addressed
+blob store and SQLite metadata. Cached images are reused immediately; older entries
+are revalidated with HTTP cache validators and the cache is bounded to avoid growing
+without limit.
 
 Set `REFRESH_CATALOG_CACHE_ON_RUN` to `False` in `config.py` to run solely from
 the complete local catalog mirror. Leave it as `True` to refresh the mirror before
@@ -31,8 +39,15 @@ thumbnails; choose one option in every row and save the selections to write them
 to `output/order.csv`. Set `ENABLE_IMAGE_SELECTION` to `False` in `config.py` to
 use automatic matching without the picker.
 
-The picker also has a top-level catalog search. Select a result, set its quantity,
-and save to append that proxy to the current order.
+The picker also has a top-level catalog search. Search results identify a card, and
+`Choose version` opens every matching set/version without preselecting anything.
+Choose a favourite explicitly before confirming it. Added rows can be cancelled
+before saving.
+
+Saving opens an in-browser recap and keeps the local session backend running. Use
+`Continue editing` to go back, `Finish order` to finalize the session, or `Cancel
+session` to discard it. Session state is persisted in
+`output/selection_sessions.sqlite3` while the picker is open.
 
 As `output`, it generates a `csv` with the list of [card name, set, quantity] matching with the cards offered by the specific vendor. Additionally, it will generate a `missing.txt` file with the cards that were not found.
 
@@ -63,6 +78,8 @@ Finally, MTG Autoproxy is not fail proof! Always double check the output before 
    3. `MATCH_FIRST_CANDIDATE`: set to `False` to include every matching version for manual selection.
    4. `ENABLE_IMAGE_SELECTION`: set to `False` to skip the visual card picker.
    5. `FUZZY_MATCH_THRESHOLD`: increase this value (maximum `1.0`) to make fuzzy matching more strict.
+   6. `THUMBNAIL_CACHE_MAX_AGE_DAYS` and `THUMBNAIL_CACHE_MAX_SIZE_MB`: control
+      thumbnail revalidation and the local cache size.
 
    The Black Lotus catalog and pricing URLs are kept in a separate section. Leave
    them unchanged unless the vendor restructures its public spreadsheet.

@@ -1,14 +1,21 @@
 import csv
-from io import BytesIO, StringIO
+import ipaddress
 import json
-from pathlib import Path
+import logging
 import re
+import socket
 import sqlite3
 import unicodedata
+from io import BytesIO, StringIO
+from pathlib import Path
+from urllib.parse import urljoin, urlparse
+
 import pandas as pd
 import requests
-import logging
 from openpyxl import load_workbook
+
+MAX_REMOTE_REDIRECTS = 5
+logger = logging.getLogger(__name__)
 
 
 class CardOrder:
@@ -56,7 +63,7 @@ def load_wanted_cards_json(uri):
             card_data = json.load(source)
 
     if not isinstance(card_data, list):
-        raise ValueError("Wanted-card JSON must be an array of card objects")
+        raise TypeError("Wanted-card JSON must be an array of card objects")
 
     cards = []
     for index, card in enumerate(card_data, start=1):
@@ -220,7 +227,9 @@ def search_vendor_catalog_cache(cache_path, query, limit=30):
     with sqlite3.connect(cache_path) as connection:
         rows = connection.execute(
             """
-            SELECT catalog_cards.id, card_name, card_set, image_url
+            SELECT catalog_cards.id, catalog_cards.card_name,
+                   catalog_cards.normalized_name, catalog_cards.card_set,
+                   catalog_cards.image_url
             FROM catalog_cards
             INNER JOIN (
                 SELECT normalized_name, MIN(id) AS id
@@ -238,10 +247,40 @@ def search_vendor_catalog_cache(cache_path, query, limit=30):
         {
             "id": card_id,
             "name": card_name,
+            "normalized_name": normalized_name,
             "card_set": card_set,
             "image_url": image_url,
         }
-        for card_id, card_name, card_set, image_url in rows
+        for card_id, card_name, normalized_name, card_set, image_url in rows
+    ]
+
+
+def search_vendor_catalog_versions(cache_path, query, limit=200):
+    normalized_query = normalize_catalog_name(query)
+    if not normalized_query:
+        return []
+
+    with sqlite3.connect(cache_path) as connection:
+        rows = connection.execute(
+            """
+            SELECT id, card_name, normalized_name, card_set, image_url
+            FROM catalog_cards
+            WHERE normalized_name LIKE ?
+            ORDER BY card_set, card_name, id
+            LIMIT ?
+            """,
+            (f"%{normalized_query}%", limit),
+        ).fetchall()
+
+    return [
+        {
+            "id": card_id,
+            "name": card_name,
+            "normalized_name": version_normalized_name,
+            "card_set": card_set,
+            "image_url": image_url,
+        }
+        for card_id, card_name, version_normalized_name, card_set, image_url in rows
     ]
 
 
@@ -273,14 +312,75 @@ def get_csv_from_gcloud(uri, header_row=0):
 
 
 def download_csv(uri):
-    logging.info("Downloading CSV list from %s...", uri)
-    response = requests.get(uri, timeout=30)
-    response.raise_for_status()
-    return response.text
+    logger.info("Downloading CSV list from %s...", uri)
+    response = request_remote(uri, timeout=30)
+    try:
+        response.raise_for_status()
+        return response.text
+    finally:
+        response.close()
 
 
 def download_file(uri):
-    logging.info("Downloading file from %s...", uri)
-    response = requests.get(uri, timeout=30)
-    response.raise_for_status()
-    return response.content
+    logger.info("Downloading file from %s...", uri)
+    response = request_remote(uri, timeout=30)
+    try:
+        response.raise_for_status()
+        return response.content
+    finally:
+        response.close()
+
+
+def request_remote(uri, timeout=30, **kwargs):
+    """Fetch a public HTTP(S) URL without following unsafe redirects."""
+    current_uri = uri
+    for _ in range(MAX_REMOTE_REDIRECTS + 1):
+        validate_remote_url(current_uri)
+        response = requests.get(
+            current_uri,
+            allow_redirects=False,
+            timeout=timeout,
+            **kwargs,
+        )
+        if not response.is_redirect:
+            return response
+
+        location = response.headers.get("Location")
+        response.close()
+        if not location:
+            raise ValueError("Remote response contained an empty redirect")
+        current_uri = urljoin(current_uri, location)
+
+    raise ValueError("Remote URL exceeded the redirect limit")
+
+
+def validate_remote_url(uri):
+    parsed_uri = urlparse(uri)
+    if parsed_uri.scheme not in {"http", "https"}:
+        raise ValueError("Remote URL must use HTTP or HTTPS")
+    if parsed_uri.username or parsed_uri.password or not parsed_uri.hostname:
+        raise ValueError("Remote URL must not contain credentials or an empty host")
+
+    try:
+        addresses = {
+            address[4][0]
+            for address in socket.getaddrinfo(
+                parsed_uri.hostname,
+                parsed_uri.port,
+                type=socket.SOCK_STREAM,
+            )
+        }
+    except (OSError, ValueError) as error:
+        raise ValueError(f"Could not resolve remote host: {parsed_uri.hostname}") from error
+
+    for address in addresses:
+        parsed_address = ipaddress.ip_address(address)
+        if (
+            parsed_address.is_private
+            or parsed_address.is_loopback
+            or parsed_address.is_link_local
+            or parsed_address.is_reserved
+            or parsed_address.is_multicast
+            or parsed_address.is_unspecified
+        ):
+            raise ValueError("Remote URL resolves to a non-public address")

@@ -4,3 +4,7 @@
 config.py
 .output/
 .venv/
+output/thumbnail_cache/
+output/selection_sessions.sqlite3*
+output/mtg_autoproxy_walkthrough.mp4
+output/walkthrough-*.png

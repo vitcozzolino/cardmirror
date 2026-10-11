@@ -31,6 +31,13 @@ VENDOR_NAME = "Black Lotus"
 # link rows; change them only if the vendor restructures the workbook.
 CATALOG_CACHE_PATH = "output/vendor_catalog.sqlite3"
 
+# Persistent image cache for the interactive picker. It stores downloaded image
+# bytes locally so subsequent runs do not repeat thumbnail requests.
+THUMBNAIL_CACHE_DIRECTORY = "output/thumbnail_cache"
+THUMBNAIL_CACHE_MAX_AGE_DAYS = 30
+THUMBNAIL_CACHE_MAX_SIZE_MB = 512
+SELECTION_SESSION_DATABASE_PATH = "output/selection_sessions.sqlite3"
+
 # True refreshes the complete local catalog mirror from the vendor workbook before
 # every run. Set to False to run entirely from the most recently synced database.
 REFRESH_CATALOG_CACHE_ON_RUN = True
