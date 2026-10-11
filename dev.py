@@ -1,4 +1,4 @@
-"""Run MTG Autoproxy and restart it when source files change."""
+"""Run CardMirror and restart it when source files change."""
 
 import subprocess
 import sys
@@ -39,7 +39,7 @@ def main():
     process = None
     try:
         while True:
-            print("[dev] Starting MTG Autoproxy...", flush=True)
+            print("[dev] Starting CardMirror...", flush=True)
             process = subprocess.Popen(
                 [sys.executable, "main.py", *sys.argv[1:]],
                 cwd=PROJECT_ROOT,

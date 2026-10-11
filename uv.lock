@@ -279,7 +279,7 @@ wheels = [
 ]
 
 [[package]]
-name = "mtg-autoproxy"
+name = "cardmirror"
 version = "0.1.0"
 source = { virtual = "." }
 dependencies = [

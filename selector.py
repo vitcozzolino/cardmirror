@@ -32,7 +32,7 @@ MAX_SELECTION_BODY_BYTES = 256 * 1024
 MAX_CLIENT_LOG_BYTES = 4096
 MAX_MARKET_BODY_BYTES = 64 * 1024
 MAX_SEARCH_QUERY_LENGTH = 200
-APPLICATION_NAME = "MTG Autoproxy"
+APPLICATION_NAME = "CardMirror"
 FAVICON_LINK = '<link rel="icon" type="image/png" href="/favicon.png">' \
     '<meta name="theme-color" content="#101311">'
 
@@ -348,7 +348,7 @@ class SelectionSessionStore:
             )
         return session_id
 
-    def save(self, session_id, selected_rows, skipped_rows):
+    def save(self, session_id, selected_rows, skipped_rows, list_cleared=False):
         payload = {
             "selected": [
                 {
@@ -361,6 +361,7 @@ class SelectionSessionStore:
                 for requested, candidate, quantity in selected_rows
             ],
             "skipped": skipped_rows,
+            "cleared": bool(list_cleared),
         }
         with self._connect() as connection:
             connection.execute(
@@ -795,6 +796,7 @@ body.modal-open {{ overflow: hidden; }}
 .additional-input {{ position: absolute; opacity: 0; }}
 .submit {{ align-items: center; background: rgba(23, 28, 25, .92); border: 1px solid var(--border); border-radius: 12px; box-shadow: 0 12px 35px rgba(0, 0, 0, .35); display: flex; gap: 16px; justify-content: flex-end; margin: 30px auto 0; max-width: 1100px; padding: 8px 24px; }}
 .save-note {{ color: var(--muted); font-size: .78rem; padding-left: 8px; }}
+.clear-list {{ background: transparent; border: 1px solid var(--border-strong); color: var(--muted); margin-right: auto; }}
 button {{ background: var(--accent); border: 0; border-radius: 8px; color: var(--accent-dark); cursor: pointer; font-size: .9rem; font-weight: 800; padding: 10px 14px; transition: filter .14s, transform .14s; }}
 button:hover {{ filter: brightness(1.08); transform: translateY(-1px); }}
 .confirm-row {{ background: var(--border-strong); color: var(--text); }}
@@ -816,7 +818,7 @@ button:hover {{ filter: brightness(1.08); transform: translateY(-1px); }}
   .options {{ grid-template-columns: repeat(2, minmax(0, 1fr)); }}
   .option img, .missing-image {{ height: 180px; }}
   .submit {{ margin: 24px 16px 0; padding: 8px; }}
-  .submit button {{ flex: 1; }}
+  .submit button:not(.clear-list) {{ flex: 1; }}
   .save-note {{ display: none; }}
 }}
 </style>
@@ -825,7 +827,7 @@ button:hover {{ filter: brightness(1.08); transform: translateY(-1px); }}
 <form action="/select" method="post">
 <header>
 <div class="header-inner">
-<p class="eyebrow">MTG Autoproxy / Card review</p>
+<p class="eyebrow">CardMirror / Card review</p>
 <h1>Proxy order made easy</h1>
 <p class="hint">Open a row, choose a version, set the quantity, and confirm it.</p>
 <label class="search-label" for="proxy-search">Add a card</label>
@@ -839,7 +841,7 @@ button:hover {{ filter: brightness(1.08); transform: translateY(-1px); }}
 <div class="table-heading"><div><p class="eyebrow">Order review</p><h2>Card versions</h2></div><div class="live-totals"><div class="live-total" aria-live="polite"><span>Estimated order</span><strong id="estimated-cost">—</strong><small id="estimated-rate">Pricing unavailable</small><small id="card-total">0 cards</small></div><div class="live-total" aria-live="polite"><span>Estimated market cost</span><strong id="market-cost">—</strong><small id="market-rate">Confirm cards to estimate</small></div></div></div>
 <main id="card-table" class="card-table">{"".join(rows)}</main>
 </div>
-<div class="submit"><span id="confirmed-count" class="save-note">0 cards confirmed</span><button type="submit">Save selections <span aria-hidden="true">→</span></button></div>
+<div class="submit"><button id="clear-list" class="clear-list" type="button">Clear list</button><span id="confirmed-count" class="save-note">0 cards confirmed</span><input id="list-cleared" type="hidden" name="list-cleared" value="0"><button type="submit">Save selections <span aria-hidden="true">→</span></button></div>
 </form>
 <div id="image-modal" class="image-modal" hidden role="dialog" aria-modal="true" aria-labelledby="image-modal-caption"><div class="image-modal-dialog"><button id="image-modal-close" class="image-modal-close" type="button" aria-label="Close image preview">Close</button><img id="expanded-image" alt=""><p id="image-modal-caption" class="image-modal-caption"></p></div></div>
 <script>
@@ -851,6 +853,8 @@ const confirmedCount = document.getElementById('confirmed-count');
 const estimatedCost = document.getElementById('estimated-cost');
 const estimatedRate = document.getElementById('estimated-rate');
 const cardTotal = document.getElementById('card-total');
+const clearListButton = document.getElementById('clear-list');
+const listClearedInput = document.getElementById('list-cleared');
 const marketCost = document.getElementById('market-cost');
 const marketRate = document.getElementById('market-rate');
 const thumbnailLoader = document.getElementById('thumbnail-loader');
@@ -860,7 +864,11 @@ const imageModalClose = document.getElementById('image-modal-close');
 const expandedImage = document.getElementById('expanded-image');
 const imageModalCaption = document.getElementById('image-modal-caption');
 const priceTiers = {price_tiers_json};
-const restoredSelectionState = null;
+const serverRestoredSelectionState = null;
+const selectionStorageKey = (() => {{
+  const session = new URLSearchParams(window.location.search).get('session');
+  return session ? 'mtg-autoproxy-selection:' + session : null;
+}})();
 const currencyFormatter = new Intl.NumberFormat('en-US', {{ style: 'currency', currency: 'USD' }});
 let searchTimer;
 let readyThumbnailCount = 0;
@@ -878,6 +886,69 @@ function updateDraftArea() {{
 function updateConfirmedCount() {{
   const count = document.querySelectorAll('.card-row[data-confirmed="true"]').length;
   confirmedCount.textContent = count + (count === 1 ? ' card confirmed' : ' cards confirmed');
+}}
+
+function loadLocalSelectionState() {{
+  if (!selectionStorageKey) return null;
+  try {{
+    const stored = window.localStorage.getItem(selectionStorageKey);
+    return stored ? JSON.parse(stored) : null;
+  }} catch (error) {{
+    console.warn('[cardmirror] Could not read saved selection state.', error);
+    return null;
+  }}
+}}
+
+const restoredSelectionState = serverRestoredSelectionState || loadLocalSelectionState();
+let listCleared = Boolean(restoredSelectionState && restoredSelectionState.cleared);
+
+function captureSelectionState() {{
+  const initial = Array.from(cardTable.querySelectorAll('.card-row[data-row-key]'))
+    .filter((row) => row.dataset.confirmed === 'true' && row.dataset.cancelled !== 'true')
+    .map((row) => {{
+      const choice = row.querySelector('input[type="radio"]:checked');
+      const rowNumber = Number.parseInt(row.dataset.rowKey.replace('initial-', ''), 10);
+      return {{
+        row: rowNumber,
+        choice: choice ? Number.parseInt(choice.value, 10) : null,
+        quantity: Number.parseInt(row.querySelector('.quantity-input').value, 10),
+      }};
+    }})
+    .filter((row) => Number.isFinite(row.row) && Number.isFinite(row.choice));
+  const additional = Array.from(cardTable.querySelectorAll('.card-row[data-card-id]'))
+    .filter((row) => row.dataset.confirmed === 'true' && row.dataset.cancelled !== 'true')
+    .map((row) => {{
+      const choice = row.querySelector('input[type="radio"]:checked');
+      const option = choice ? choice.closest('.option') : null;
+      const image = option ? option.querySelector('.option-thumbnail') : null;
+      const name = option ? option.querySelector('strong') : null;
+      const cardSet = option ? option.querySelector('span') : null;
+      return {{
+        id: choice ? Number.parseInt(choice.dataset.cardId, 10) : null,
+        name: name ? name.textContent : '',
+        card_set: cardSet ? cardSet.textContent : '',
+        image_path: image ? image.dataset.localImage : null,
+        image_full_url: image ? image.dataset.fullImage : null,
+        quantity: Number.parseInt(row.querySelector('.quantity-input').value, 10),
+      }};
+    }})
+    .filter((row) => Number.isFinite(row.id) && row.name && row.card_set && row.quantity > 0);
+  return {{ initial, additional, cleared: listCleared }};
+}}
+
+function persistSelectionState() {{
+  if (!selectionStorageKey) return;
+  try {{
+    listClearedInput.value = listCleared ? '1' : '0';
+    window.localStorage.setItem(selectionStorageKey, JSON.stringify(captureSelectionState()));
+  }} catch (error) {{
+    console.warn('[cardmirror] Could not save selection state.', error);
+  }}
+}}
+
+function clearAllCardRows() {{
+  cardTable.querySelectorAll('.card-row').forEach((row) => row.remove());
+  draftArea.querySelectorAll('.draft-row').forEach((row) => row.remove());
 }}
 
 function updateLiveTotal() {{
@@ -959,7 +1030,7 @@ async function refreshMarketTotal() {{
     if (requestId !== marketRequestId) return;
     marketCost.textContent = 'Unavailable';
     marketRate.textContent = 'Market lookup failed';
-    console.warn('[mtg-autoproxy] Market price lookup failed.', error);
+    console.warn('[cardmirror] Market price lookup failed.', error);
   }}
 }}
 
@@ -1020,7 +1091,7 @@ function preloadFullImages(root) {{
     fullImage.onerror = () => {{
       thumbnail.dataset.fullPreloadState = 'failed';
       const warning = 'Could not preload full embedded image; the cached thumbnail will be used.';
-      console.warn('[mtg-autoproxy] ' + warning, source);
+      console.warn('[cardmirror] ' + warning, source);
       reportClientWarning(warning, source);
     }};
     fullImage.src = source;
@@ -1057,13 +1128,13 @@ function openImageModal(image) {{
       clearTimeout(imageModalLoadTimer);
       imageModalLoadTimer = null;
       const warning = 'Could not load full embedded image; using the cached image instead.';
-      console.warn('[mtg-autoproxy] ' + warning, source);
+      console.warn('[cardmirror] ' + warning, source);
       reportClientWarning(warning, source);
     }};
     imageModalLoadTimer = setTimeout(() => {{
       if (requestId !== imageModalRequestId || imageModal.hidden) return;
       const warning = 'Timed out loading full embedded image; using the cached image instead.';
-      console.warn('[mtg-autoproxy] ' + warning, source);
+      console.warn('[cardmirror] ' + warning, source);
       reportClientWarning(warning, source);
     }}, 10000);
     remoteImage.src = source;
@@ -1182,7 +1253,7 @@ async function addAllVersions(result, trigger, query) {{
     const versions = await response.json();
     addSearchCard(result, versions);
   }} catch (error) {{
-    console.error('[mtg-autoproxy] Could not load card versions.', error);
+    console.error('[cardmirror] Could not load card versions.', error);
     trigger.removeAttribute('aria-busy');
     trigger.classList.remove('is-loading');
     if (trigger.tagName === 'BUTTON') trigger.disabled = false;
@@ -1190,6 +1261,7 @@ async function addAllVersions(result, trigger, query) {{
 }}
 
 function addSearchCard(result, versions) {{
+  listCleared = false;
   const draftId = (result.id || 'query') + '-' + Date.now();
   const choices = versions.length ? versions : [result];
   const row = document.createElement('section');
@@ -1249,6 +1321,7 @@ function bindRow(row) {{
     if (confirmed) confirmed.value = '0';
     if (additional) additional.checked = false;
     updateConfirmedCount();
+    persistSelectionState();
   }};
   quantity.addEventListener('input', () => {{
     const value = Math.max(1, parseInt(quantity.value || '1', 10));
@@ -1261,13 +1334,14 @@ function bindRow(row) {{
   }}));
   cancelButton.addEventListener('click', () => {{
     if (row.classList.contains('draft-row')) {{
-      row.remove(); updateDraftArea(); updateLiveTotal(); return;
+      row.remove(); updateDraftArea(); updateLiveTotal(); persistSelectionState(); return;
     }}
     markChanged();
     row.dataset.cancelled = 'true';
     row.querySelector('.status').textContent = 'Cancelled';
     details.open = false;
     updateLiveTotal();
+    persistSelectionState();
   }});
   confirmButton.addEventListener('click', () => {{
     if (!quantity.reportValidity()) return;
@@ -1290,11 +1364,25 @@ function bindRow(row) {{
     }}
     updateConfirmedCount();
     updateLiveTotal();
+    persistSelectionState();
   }});
 }}
 
+clearListButton.addEventListener('click', () => {{
+  if (!window.confirm('Clear every card from this proxy order?')) return;
+  listCleared = true;
+  clearAllCardRows();
+  updateDraftArea();
+  updateConfirmedCount();
+  updateLiveTotal();
+  persistSelectionState();
+}});
+
 function restoreSelectionState() {{
   if (!restoredSelectionState) return;
+  if (restoredSelectionState.cleared) {{
+    clearAllCardRows();
+  }}
   for (const restored of restoredSelectionState.initial || []) {{
     const row = document.querySelector('[data-row-key="initial-' + restored.row + '"]');
     if (!row) continue;
@@ -1337,6 +1425,7 @@ restoreSelectionState();
 updateDraftArea();
 updateConfirmedCount();
 updateLiveTotal();
+persistSelectionState();
 watchThumbnails();
 bindThumbnailPreview(document);
 preloadFullImages(document);
@@ -1379,6 +1468,7 @@ preloadFullImages(document);
             image_id: image_data[image_page_url]
             for image_page_url, image_id in image_ids.items()
         }
+        cleared_state = {"value": False}
         favicon_path = Path(__file__).resolve().parent / "res" / "mtg_autoproxy_icon.png"
         try:
             favicon_data = favicon_path.read_bytes()
@@ -1605,6 +1695,7 @@ preloadFullImages(document);
             def _save_selections(self, query):
                 selected_rows = []
                 skipped_rows = []
+                cleared_state["value"] = query.get("list-cleared", ["0"])[0] == "1"
                 for request_index, (_, original_quantity, _) in enumerate(selection_requests):
                     selections[request_index] = None
                     selection_quantities[request_index] = original_quantity
@@ -1640,7 +1731,12 @@ preloadFullImages(document);
                 last_recap["selected_rows"] = selected_rows
                 last_recap["skipped_rows"] = skipped_rows
                 if session_store and session_id:
-                    session_store.save(session_id, selected_rows, skipped_rows)
+                    session_store.save(
+                        session_id,
+                        selected_rows,
+                        skipped_rows,
+                        list_cleared=cleared_state["value"],
+                    )
                 try:
                     self._respond_html(
                         self._recap_html(selected_rows, skipped_rows)
@@ -1663,6 +1759,7 @@ preloadFullImages(document);
                         if choice is not None
                     ],
                     "additional": [],
+                    "cleared": cleared_state["value"],
                 }
                 for candidate, quantity in additional_selections:
                     image_id = image_ids.get(candidate.image_url)
@@ -1682,8 +1779,8 @@ preloadFullImages(document);
                         }
                     )
                 editing_page = page.replace(
-                    "const restoredSelectionState = null;",
-                    "const restoredSelectionState = " + json.dumps(restore_state) + ";",
+                    "const serverRestoredSelectionState = null;",
+                    "const serverRestoredSelectionState = " + json.dumps(restore_state) + ";",
                     1,
                 )
                 logger.info(
@@ -1861,7 +1958,7 @@ button {{ background: var(--accent); border: 0; border-radius: 8px; color: #2436
 </head>
 <body>
 <main class="recap">
-<p class="eyebrow">MTG Autoproxy / Selection complete</p>
+<p class="eyebrow">CardMirror / Selection complete</p>
 <h1>Proxy order recap</h1>
 <p class="lead">Review the versions and quantities selected for this order.</p>
 <section class="summary-card">

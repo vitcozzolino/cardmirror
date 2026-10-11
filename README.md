@@ -1,12 +1,12 @@
 <img src="img/mtg_autoproxy.jpg" alt="Generated with https://openart.ai/" width="120" height="120">
 
-# MTG Autoproxy
+# CardMirror
 
-MTG Autoproxy is a Python program to automatically generate a vendor-specific list of MTG proxies. Currently, the only supported vendor is Blacklotus [1](https://www.aliexpress.com/item/1005001356681692.html?spm=a2g0o.store_home.productList_1386204970.subject_0), [2](https://docs.google.com/spreadsheets/d/1E2iSRhhNUjaZ3MblXx_rflpOIkMwK40OgX5X6yXE4zw/edit#gid=1033599937).
+CardMirror is a Python program to automatically generate a vendor-specific list of MTG proxies. Currently, the only supported vendor is Blacklotus [1](https://www.aliexpress.com/item/1005001356681692.html?spm=a2g0o.store_home.productList_1386204970.subject_0), [2](https://docs.google.com/spreadsheets/d/1E2iSRhhNUjaZ3MblXx_rflpOIkMwK40OgX5X6yXE4zw/edit#gid=1033599937).
 
 For example, if you have `Ancient Tomb` in the list of wanted cards, the program will select the matching proxy card for it (in this case, `Ancient Tomb English`) based on [Jaro–Winkler distance](http://en.wikipedia.org/wiki/Jaro%E2%80%93Winkler_distance). In the case of blacklotus, it also prioritises regular cards (non foil/holo).
 
-MTG Autoproxy downloads Black Lotus's current catalog automatically, then matches it
+CardMirror downloads Black Lotus's current catalog automatically, then matches it
 against a local wanted-card JSON file. Each entry needs a `name` and optional
 `quantity`; Google Sheet CSV exports remain optional.
 
@@ -70,7 +70,7 @@ session` to discard it. Session state is persisted in
 
 As `output`, it generates a `csv` with the list of [card name, set, quantity] matching with the cards offered by the specific vendor. Additionally, it will generate a `missing.txt` file with the cards that were not found.
 
-Finally, MTG Autoproxy is not fail proof! Always double check the output before ordering your proxies :)
+Finally, CardMirror is not fail proof! Always double check the output before ordering your proxies :)
 
 # Prerequisites
 
@@ -78,7 +78,7 @@ Finally, MTG Autoproxy is not fail proof! Always double check the output before 
 - [uv](https://docs.astral.sh/uv/getting-started/installation/)
 - A list of wanted cards formatted as `res/wanted_cards.json`
   
-# Running MTG Autoproxy
+# Running CardMirror
 
 1. Create the virtual environment and install locked dependencies with `uv sync`.
 2. Create a wanted-card JSON list:

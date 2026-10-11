@@ -1,7 +1,7 @@
 [project]
-name = "mtg-autoproxy"
+name = "cardmirror"
 version = "0.1.0"
-description = "Generate vendor-specific Magic: The Gathering proxy orders."
+description = "CardMirror: generate vendor-specific Magic: The Gathering proxy orders."
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [

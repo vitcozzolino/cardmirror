@@ -79,7 +79,7 @@ class ScryfallClient:
             url,
             headers={
                 "Accept": "application/json",
-                "User-Agent": "mtg-autoproxy/0.1 (+local-card-order-tool)",
+                "User-Agent": "cardmirror/0.1 (+local-card-order-tool)",
             },
             timeout=30,
         )
