@@ -55,7 +55,7 @@ bounded.
 ## Validation
 
 - `uv lock --check` — passed
-- `bandit` over `main.py`, `selector.py`, and `utils.py` — 0 findings
+- `bandit` over `src/cardmirror/main.py`, `src/cardmirror/selector.py`, and `src/cardmirror/utils.py` — 0 findings
 - `pip-audit` over the locked export — no known vulnerabilities
 - `ruff check` — passed
 - Python compilation and targeted SSRF/CSV smoke checks — passed

@@ -15,7 +15,7 @@ from dataclasses import dataclass, field
 from io import StringIO
 from urllib.parse import quote, urlencode, urlparse, urlunparse
 
-from utils import normalize_catalog_name, request_remote
+from .utils import normalize_catalog_name, request_remote
 
 logger = logging.getLogger(__name__)
 

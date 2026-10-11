@@ -17,7 +17,7 @@ from urllib.parse import parse_qs, urljoin, urlparse, urlunparse
 
 import requests
 
-from utils import (
+from .utils import (
     load_vendor_catalog_card,
     load_vendor_catalog_image_urls,
     request_remote,
@@ -1469,7 +1469,7 @@ preloadFullImages(document);
             for image_page_url, image_id in image_ids.items()
         }
         cleared_state = {"value": False}
-        favicon_path = Path(__file__).resolve().parent / "res" / "mtg_autoproxy_icon.png"
+        favicon_path = Path(__file__).resolve().parents[2] / "assets" / "cardmirror_icon.png"
         try:
             favicon_data = favicon_path.read_bytes()
         except OSError as error:

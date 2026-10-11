@@ -1,14 +1,19 @@
 """Settings for generating a Black Lotus proxy order."""
 
+from pathlib import Path
+
+
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
+
 # -----------------------------------------------------------------------------
 # Your order
 # -----------------------------------------------------------------------------
 
 # Path or URL of a JSON card list. Each item needs a `name` and optional `quantity`.
-WANTED_CARDS_SOURCE = "res/wanted_cards.json"
+WANTED_CARDS_SOURCE = str(PROJECT_ROOT / "data" / "wanted_cards.json")
 
 # Folder where order.csv and missing.txt are created.
-OUTPUT_DIRECTORY = "output"
+OUTPUT_DIRECTORY = str(PROJECT_ROOT / "output")
 
 # True adds only the first match for each requested card. Set to False to include
 # every match so you can select a specific version manually.
@@ -29,18 +34,18 @@ VENDOR_NAME = "Black Lotus"
 
 # Public workbook. The header and skip settings account for the sheet's title and
 # link rows; change them only if the vendor restructures the workbook.
-CATALOG_CACHE_PATH = "output/vendor_catalog.sqlite3"
+CATALOG_CACHE_PATH = str(PROJECT_ROOT / "output" / "vendor_catalog.sqlite3")
 
 # Persistent image cache for the interactive picker. It stores downloaded image
 # bytes locally so subsequent runs do not repeat thumbnail requests.
-THUMBNAIL_CACHE_DIRECTORY = "output/thumbnail_cache"
+THUMBNAIL_CACHE_DIRECTORY = str(PROJECT_ROOT / "output" / "thumbnail_cache")
 THUMBNAIL_CACHE_MAX_AGE_DAYS = 30
 THUMBNAIL_CACHE_MAX_SIZE_MB = 512
 # Opportunistically warm uncached catalog thumbnails while the picker is idle.
 THUMBNAIL_PREFETCH_ENABLED = True
 THUMBNAIL_PREFETCH_WORKERS = 2
 THUMBNAIL_PREFETCH_IDLE_SECONDS = 2.0
-SELECTION_SESSION_DATABASE_PATH = "output/selection_sessions.sqlite3"
+SELECTION_SESSION_DATABASE_PATH = str(PROJECT_ROOT / "output" / "selection_sessions.sqlite3")
 
 # True refreshes the complete local catalog mirror from the vendor workbook before
 # every run. Set to False to run entirely from the most recently synced database.
@@ -76,7 +81,7 @@ PRICING_URL = (
 # backend when API access is approved.
 MARKET_PRICE_PROVIDER = "scryfall"
 SCRYFALL_ENABLED = True
-SCRYFALL_CACHE_PATH = "output/scryfall_cache.sqlite3"
+SCRYFALL_CACHE_PATH = str(PROJECT_ROOT / "output" / "scryfall_cache.sqlite3")
 SCRYFALL_CACHE_HOURS = 24
 SCRYFALL_FOIL_MODE = "auto"  # auto, normal, or foil
 MARKET_VENDOR_CURRENCY = "USD"
@@ -88,7 +93,7 @@ MARKET_VENDOR_TO_EUR_RATE = None
 # are optional for app-only requests, but can be supplied when Cardmarket
 # provides user credentials for the application.
 CARDMARKET_ENABLED = True
-CARDMARKET_CACHE_PATH = "output/cardmarket_cache.sqlite3"
+CARDMARKET_CACHE_PATH = str(PROJECT_ROOT / "output" / "cardmarket_cache.sqlite3")
 CARDMARKET_API_BASE_URL = "https://apiv2.cardmarket.com/ws/v2.0"
 CARDMARKET_PRICE_GUIDE_BASE_URL = "https://api.cardmarket.com/ws/v2.0"
 CARDMARKET_PRICE_SOURCE = "articles"

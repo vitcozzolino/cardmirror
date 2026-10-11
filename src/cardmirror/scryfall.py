@@ -7,8 +7,8 @@ import time
 from pathlib import Path
 from urllib.parse import urlencode
 
-from cardmarket import MarketEstimate
-from utils import normalize_catalog_name, request_remote
+from .cardmarket import MarketEstimate
+from .utils import normalize_catalog_name, request_remote
 
 logger = logging.getLogger(__name__)
 

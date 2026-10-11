@@ -1,4 +1,4 @@
-<img src="img/cardmirror_icon.png" alt="CardMirror icon" width="120" height="120">
+<img src="assets/cardmirror_icon.png" alt="CardMirror icon" width="120" height="120">
 
 # CardMirror
 
@@ -31,7 +31,7 @@ uv sync
 
 ### 3. Add wanted cards
 
-Edit `res/wanted_cards.json`:
+Edit `data/wanted_cards.json`:
 
 ```json
 [
@@ -59,7 +59,7 @@ After finishing, check:
 
 ## Configuration
 
-Common settings are in `config.py`:
+Common settings are in `src/cardmirror/config.py`:
 
 - `WANTED_CARDS_SOURCE` — input JSON path.
 - `ENABLE_IMAGE_SELECTION` — enable or disable the browser picker.

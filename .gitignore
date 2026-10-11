@@ -1,9 +1,10 @@
-*.pycache
+__pycache__/
 *.pyc
 *.ipynb_checkpoints
-config.py
 .output/
 .venv/
+.ruff_cache/
+.DS_Store
 output/thumbnail_cache/
 output/selection_sessions.sqlite3*
 output/mtg_autoproxy_walkthrough.mp4
