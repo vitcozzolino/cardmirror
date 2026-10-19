@@ -10,6 +10,7 @@ import requests
 
 from .cardmarket import CardmarketPriceProvider
 from . import config
+from .mtgstocks import MTGStocksPriceProvider
 from .selector import CardSelector
 from .scryfall import ScryfallPriceProvider
 from .utils import (
@@ -342,6 +343,17 @@ def main():
             currency=config.CARDMARKET_CURRENCY,
             vendor_currency=config.CARDMARKET_VENDOR_CURRENCY,
             vendor_to_market_rate=config.CARDMARKET_VENDOR_TO_MARKET_RATE,
+        )
+    elif config.MARKET_PRICE_PROVIDER == "mtgstocks" and config.MTGSTOCKS_ENABLED:
+        market_provider = MTGStocksPriceProvider(
+            cache_path=config.MTGSTOCKS_CACHE_PATH,
+            base_url=config.MTGSTOCKS_BASE_URL,
+            api_url=config.MTGSTOCKS_API_URL,
+            cache_hours=config.MTGSTOCKS_CACHE_HOURS,
+            request_delay_seconds=config.MTGSTOCKS_REQUEST_DELAY_SECONDS,
+            currency=config.MTGSTOCKS_CURRENCY,
+            vendor_currency=config.MTGSTOCKS_VENDOR_CURRENCY,
+            vendor_to_market_rate=config.MTGSTOCKS_VENDOR_TO_MARKET_RATE,
         )
     if market_provider and not market_provider.configured:
         logger.info("Market comparison provider is not configured.")

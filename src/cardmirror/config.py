@@ -111,6 +111,19 @@ CARDMARKET_VENDOR_CURRENCY = "USD"
 # an estimated saving percentage. Leave as None to show both totals separately.
 CARDMARKET_VENDOR_TO_MARKET_RATE = None
 
+# MTGStocks is an optional, best-effort backend. It uses the public HTML
+# search flow unless MTGStocks-compatible JSON endpoint is configured. The
+# provider never bypasses WAF, CAPTCHA, or other access controls.
+MTGSTOCKS_ENABLED = False
+MTGSTOCKS_CACHE_PATH = str(PROJECT_ROOT / "output" / "mtgstocks_cache.sqlite3")
+MTGSTOCKS_CACHE_HOURS = 24
+MTGSTOCKS_BASE_URL = "https://www.mtgstocks.com"
+MTGSTOCKS_API_URL = ""
+MTGSTOCKS_REQUEST_DELAY_SECONDS = 1.0
+MTGSTOCKS_CURRENCY = "USD"
+MTGSTOCKS_VENDOR_CURRENCY = "USD"
+MTGSTOCKS_VENDOR_TO_MARKET_RATE = None
+
 
 # -----------------------------------------------------------------------------
 # Diagnostics

@@ -203,6 +203,39 @@ class ThumbnailCache:
                 (source_url,),
             ).fetchone()
 
+    def filter_needing_fetch(self, source_urls):
+        """Return only URLs without a fresh, readable cached image."""
+        source_urls = set(source_urls)
+        if not source_urls:
+            return set()
+
+        fresh_urls = set()
+        current_time = time.time()
+        source_url_list = list(source_urls)
+        with self._connect() as connection:
+            for offset in range(0, len(source_url_list), 900):
+                chunk = source_url_list[offset:offset + 900]
+                placeholders = ",".join("?" for _ in chunk)
+                records = connection.execute(
+                    f"""
+                    SELECT source_url, resolved_url, blob_name, fetched_at
+                    FROM thumbnails
+                    WHERE source_url IN ({placeholders})
+                    """,
+                    chunk,
+                ).fetchall()
+                for source_url, resolved_url, blob_name, fetched_at in records:
+                    blob_path = self.blob_directory / blob_name
+                    legacy_google_preview = "=w600-h315" in resolved_url
+                    if (
+                        blob_path.is_file()
+                        and not legacy_google_preview
+                        and current_time - fetched_at <= self.max_age_seconds
+                    ):
+                        fresh_urls.add(source_url)
+
+        return source_urls - fresh_urls
+
     def _read_cached_image(self, record):
         if not record:
             return None
@@ -562,8 +595,14 @@ class CardSelector:
         if not self.thumbnail_prefetch_enabled:
             return OpportunisticThumbnailPrefetcher([], self._load_image)
 
-        image_urls = set(load_vendor_catalog_image_urls(self.catalog_cache_path))
+        catalog_image_urls = set(load_vendor_catalog_image_urls(self.catalog_cache_path))
+        image_urls = self.thumbnail_cache.filter_needing_fetch(catalog_image_urls)
         image_urls.difference_update(image_data)
+        logger.info(
+            "Thumbnail preload queue: %d uncached or stale of %d catalog images.",
+            len(image_urls),
+            len(catalog_image_urls),
+        )
         return OpportunisticThumbnailPrefetcher(
             image_urls,
             self._load_image,
