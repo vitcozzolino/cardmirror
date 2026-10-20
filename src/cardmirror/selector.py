@@ -1,4 +1,3 @@
-import base64
 import hashlib
 import json
 import logging
@@ -1935,22 +1934,9 @@ main { margin: auto; max-width: 620px; } p { color: #9ca99f; }
                         vendor_total=selector._vendor_total_for_rows(selected_rows),
                     )
                 table_rows = []
-                for requested_name, candidate, quantity in selected_rows:
-                    image_id = image_ids.get(candidate.image_url)
-                    image = image_data_by_id.get(image_id)
-                    if image:
-                        image_bytes, content_type, _ = image
-                        image_markup = (
-                            f'<img class="recap-image" src="data:{content_type};base64,'
-                            f'{base64.b64encode(image_bytes).decode("ascii")}" '
-                            f'alt="{escape(candidate.name)}">'
-                        )
-                    else:
-                        image_markup = '<div class="recap-image missing-image">No image</div>'
+                for _, candidate, quantity in selected_rows:
                     table_rows.append(
-                        f'<tr><td>{image_markup}</td>'
-                        f'<td><strong>{escape(requested_name)}</strong></td>'
-                        f'<td>{escape(candidate.name)}</td>'
+                        f'<tr><td><strong>{escape(candidate.name)}</strong></td>'
                         f'<td>{escape(candidate.card_set)}</td>'
                         f'<td class="quantity">{quantity}</td></tr>'
                     )
@@ -2040,8 +2026,6 @@ th, td {{ border-bottom: 1px solid var(--border); padding: 12px 16px; vertical-a
 tbody tr:last-child td {{ border-bottom: 0; }}
 td {{ color: var(--muted); font-size: .86rem; }}
 td strong {{ color: var(--text); display: block; margin-bottom: 3px; }}
-.recap-image {{ background: #080b09; border-radius: 6px; display: block; height: 70px; object-fit: contain; width: 50px; }}
-.missing-image {{ align-content: center; font-size: .65rem; text-align: center; }}
 .quantity {{ color: var(--text); font-size: 1rem; font-weight: 800; text-align: right; }}
 .skipped {{ background: #2d2412; border-top: 1px solid #70552a; color: #f0c66b; font-size: .82rem; padding: 13px 16px; }}
 .actions {{ align-items: center; display: flex; gap: 10px; justify-content: flex-end; padding: 18px 20px; }}
@@ -2050,7 +2034,7 @@ td strong {{ color: var(--text); display: block; margin-bottom: 3px; }}
 button {{ background: var(--accent); border: 0; border-radius: 8px; color: #243619; cursor: pointer; font-size: .9rem; font-weight: 800; padding: 10px 14px; }}
 .finish {{ background: var(--accent); border-radius: 8px; color: #243619; font-size: .9rem; font-weight: 800; padding: 10px 14px; text-decoration: none; }}
 .cancel {{ color: var(--muted); font-size: .82rem; padding: 10px 8px; text-decoration: none; }}
-@media print {{ body {{ background: #fff; color: #111; padding: 0; }} .summary-card {{ border-color: #ccc; }} .actions {{ display: none; }} }}
+@media print {{ body {{ background: #fff; color: #111; padding: 0; }} .recap > .eyebrow, .recap > h1, .recap > .lead, .summary-bar, .market-comparison, .skipped, .actions {{ display: none; }} .summary-card {{ border: 0; }} .table-wrap {{ overflow: visible; }} table {{ min-width: 0; }} th, td {{ color: #111; }} }}
 @media (max-width: 640px) {{ body {{ padding: 28px 14px; }} .summary-bar, .actions {{ align-items: stretch; flex-direction: column; }} .cancel {{ text-align: center; }} }}
 </style>
 </head>
@@ -2062,7 +2046,7 @@ button {{ background: var(--accent); border: 0; border-radius: 8px; color: #2436
 <section class="summary-card">
 <div class="summary-bar"><span>{len(selected_rows)} selected line(s)</span><strong>{total_quantity} total card(s)</strong></div>
 {market_markup}
-<div class="table-wrap"><table><thead><tr><th>Preview</th><th>Requested</th><th>Selected version</th><th>Set</th><th>Qty</th></tr></thead><tbody>{"".join(table_rows)}</tbody></table></div>
+<div class="table-wrap"><table><thead><tr><th>Card name</th><th>Version</th><th>Amount</th></tr></thead><tbody>{"".join(table_rows)}</tbody></table></div>
 {skipped_markup}
 <div class="actions">{action_markup}<button type="button" onclick="window.print()">Print recap</button></div>
 </section>
