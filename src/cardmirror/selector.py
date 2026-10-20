@@ -547,11 +547,12 @@ class CardSelector:
         ]
         return total_cards * applicable_tiers[-1] if applicable_tiers else None
 
-    def select_all(self, selection_requests):
+    def select_all(self, selection_requests, on_save=None, on_cancel=None):
         image_data = self._preload_images(selection_requests)
         selections = [None] * len(selection_requests)
         selection_quantities = [quantity for _, quantity, _ in selection_requests]
         additional_selections = []
+        completion_state = {"finished": False, "list_cleared": False}
         completed = threading.Event()
         session_id = self.session_store.create()
         page, image_ids = self._build_page(selection_requests, image_data)
@@ -568,6 +569,9 @@ class CardSelector:
             self.session_store,
             session_id,
             prefetcher,
+            completion_state,
+            on_save,
+            on_cancel,
         )
         server = ThreadingHTTPServer(("127.0.0.1", 0), handler)
         server_thread = threading.Thread(target=server.serve_forever, daemon=True)
@@ -589,7 +593,13 @@ class CardSelector:
             candidates[index] if index is not None else None
             for (_, _, candidates), index in zip(selection_requests, selections)
         ]
-        return selected_candidates, selection_quantities, additional_selections
+        return (
+            selected_candidates,
+            selection_quantities,
+            additional_selections,
+            completion_state["finished"],
+            completion_state["list_cleared"],
+        )
 
     def _create_thumbnail_prefetcher(self, image_data):
         if not self.thumbnail_prefetch_enabled:
@@ -725,7 +735,7 @@ class CardSelector:
                 f'<label>Quantity <input class="quantity-input" type="number" '
                 f'name="quantity-{request_index}" min="1" value="{quantity}"></label>'
                 f'<input type="hidden" name="confirmed-{request_index}" value="0">'
-                f'<div class="row-actions"><button type="button" class="cancel-row">Cancel</button>'
+                f'<div class="row-actions"><button type="button" class="remove-row">Remove card</button>'
                 f'<button type="button" class="confirm-row">Confirm card</button></div></div>'
                 f'<div class="options">{"".join(options)}</div></div></details></section>'
             )
@@ -839,7 +849,7 @@ body.modal-open {{ overflow: hidden; }}
 button {{ background: var(--accent); border: 0; border-radius: 8px; color: var(--accent-dark); cursor: pointer; font-size: .9rem; font-weight: 800; padding: 10px 14px; transition: filter .14s, transform .14s; }}
 button:hover {{ filter: brightness(1.08); transform: translateY(-1px); }}
 .confirm-row {{ background: var(--border-strong); color: var(--text); }}
-.cancel-row {{ background: transparent; color: var(--muted); }}
+.remove-row {{ background: transparent; color: var(--muted); }}
 .card-row[data-cancelled="true"] {{ border-color: var(--border); opacity: .68; }}
 @media (max-width: 640px) {{
   body {{ padding-bottom: 96px; }}
@@ -1309,7 +1319,7 @@ function addSearchCard(result, versions) {{
     <summary><span class="row-name"></span><span class="row-summary-meta"><span class="status">Needs confirmation</span><span class="summary-quantity">1 item(s)</span></span></summary>
     <div class="row-content"><div class="row-controls"><label>Quantity <input class="quantity-input" type="number" name="quantity-${{draftId}}" min="1" value="1"></label>
       <input class="additional-input" type="checkbox" name="additional" value="">
-      <div class="row-actions"><button type="button" class="cancel-row">Cancel</button><button type="button" class="confirm-row">Confirm card</button></div></div><div class="options"></div></div></details>`;
+      <div class="row-actions"><button type="button" class="remove-row">Remove card</button><button type="button" class="confirm-row">Confirm card</button></div></div><div class="options"></div></div></details>`;
   row.querySelector('.row-name').textContent = result.name;
   const options = row.querySelector('.options');
   choices.forEach((version) => {{
@@ -1346,7 +1356,7 @@ function bindRow(row) {{
   const summaryQuantity = row.querySelector('.summary-quantity');
   const confirmed = row.querySelector('input[name^="confirmed-"]');
   const additional = row.querySelector('.additional-input');
-  const cancelButton = row.querySelector('.cancel-row');
+  const removeButton = row.querySelector('.remove-row');
   const confirmButton = row.querySelector('.confirm-row');
   const setAdditionalVersion = (input) => {{
     if (!additional || !input) return;
@@ -1371,14 +1381,10 @@ function bindRow(row) {{
   row.querySelectorAll('input[type="radio"]').forEach(input => input.addEventListener('change', () => {{
     markChanged(); setAdditionalVersion(input);
   }}));
-  cancelButton.addEventListener('click', () => {{
-    if (row.classList.contains('draft-row')) {{
-      row.remove(); updateDraftArea(); updateLiveTotal(); persistSelectionState(); return;
-    }}
-    markChanged();
-    row.dataset.cancelled = 'true';
-    row.querySelector('.status').textContent = 'Cancelled';
-    details.open = false;
+  removeButton.addEventListener('click', () => {{
+    row.remove();
+    updateDraftArea();
+    updateConfirmedCount();
     updateLiveTotal();
     persistSelectionState();
   }});
@@ -1485,6 +1491,9 @@ preloadFullImages(document);
         session_store=None,
         session_id=None,
         prefetcher=None,
+        completion_state=None,
+        on_save=None,
+        on_cancel=None,
     ):
         if session_id:
             page = page.replace(
@@ -1735,6 +1744,8 @@ preloadFullImages(document);
                 selected_rows = []
                 skipped_rows = []
                 cleared_state["value"] = query.get("list-cleared", ["0"])[0] == "1"
+                if completion_state is not None:
+                    completion_state["list_cleared"] = cleared_state["value"]
                 for request_index, (_, original_quantity, _) in enumerate(selection_requests):
                     selections[request_index] = None
                     selection_quantities[request_index] = original_quantity
@@ -1776,6 +1787,11 @@ preloadFullImages(document);
                         skipped_rows,
                         list_cleared=cleared_state["value"],
                     )
+                if on_save:
+                    try:
+                        on_save(selected_rows, cleared_state["value"])
+                    except (OSError, ValueError) as error:
+                        logger.warning("Could not persist draft selections: %s", error)
                 try:
                     self._respond_html(
                         self._recap_html(selected_rows, skipped_rows)
@@ -1830,6 +1846,8 @@ preloadFullImages(document);
                 self._respond_html(editing_page)
 
             def _finish_session(self):
+                if completion_state is not None:
+                    completion_state["finished"] = True
                 if session_store and session_id:
                     session_store.finish(session_id)
                 try:
@@ -1847,6 +1865,11 @@ preloadFullImages(document);
                 for request_index in range(len(selections)):
                     selections[request_index] = None
                 additional_selections.clear()
+                if on_cancel:
+                    try:
+                        on_cancel()
+                    except (OSError, ValueError) as error:
+                        logger.warning("Could not restore the wanted-card list: %s", error)
                 if session_store and session_id:
                     session_store.finish(session_id, status="cancelled")
                 try:

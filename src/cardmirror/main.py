@@ -20,6 +20,7 @@ from .utils import (
     load_vendor_catalog_cache,
     load_vendor_price_tiers,
     load_wanted_cards,
+    save_wanted_cards,
     sync_vendor_catalog_cache,
 )
 
@@ -134,14 +135,30 @@ def process_cards(
     selection_requests = []
     for _, row in wanted_cards.iterrows():
         wanted = row.get("Wanted", "")
+        requested_set = str(row.get("Set", "") or "").strip()
         quantity = row.get("QTY", 1) or 1
         if wanted:
             candidates = find_card_candidates(wanted, vendor_cards, image_links)
+            if requested_set:
+                requested_set_name = normalize_card_name(requested_set)
+                set_candidates = [
+                    candidate
+                    for candidate in candidates
+                    if normalize_card_name(candidate.card_set) == requested_set_name
+                ]
+                if set_candidates:
+                    candidates = set_candidates
+                else:
+                    logger.warning(
+                        "Saved card version '%s' was not found for '%s'; reviewing all matches.",
+                        requested_set,
+                        wanted,
+                    )
             if not candidates:
                 missing.append(wanted)
                 continue
 
-            if card_selector and len(candidates) > 1:
+            if card_selector:
                 selection_requests.append((wanted, quantity, candidates))
             elif config.MATCH_FIRST_CANDIDATE:
                 add_to_order(candidates[0], quantity, set_counters, to_order)
@@ -150,17 +167,67 @@ def process_cards(
                     add_to_order(candidate, quantity, set_counters, to_order)
 
     if not selection_requests:
-        return
+        return False
+
+    base_order = list(to_order)
+    original_orders = []
+    for _, row in wanted_cards.iterrows():
+        wanted = row.get("Wanted", "")
+        if not wanted:
+            continue
+        original_orders.append(
+            CardOrder(
+                str(wanted),
+                str(row.get("Set", "") or ""),
+                int(row.get("QTY", 1) or 1),
+            )
+        )
+    draft_state = {"saved": False}
+
+    def persist_draft(selected_rows, list_cleared):
+        draft_orders = [] if list_cleared else list(base_order)
+        draft_orders.extend(
+            CardOrder(candidate.name, candidate.card_set, quantity)
+            for _, candidate, quantity in selected_rows
+        )
+        save_wanted_cards(config.WANTED_CARDS_SOURCE, draft_orders)
+        draft_state["saved"] = True
+        logger.info(
+            "Persisted draft selection of %d card line(s) to %s.",
+            len(draft_orders),
+            config.WANTED_CARDS_SOURCE,
+        )
+
+    def restore_original_list():
+        if not draft_state["saved"]:
+            return
+        save_wanted_cards(config.WANTED_CARDS_SOURCE, original_orders)
+        logger.info("Restored the wanted-card list after session cancellation.")
 
     try:
-        selections, selection_quantities, additional_selections = card_selector.select_all(
-            selection_requests
+        (
+            selections,
+            selection_quantities,
+            additional_selections,
+            selection_finished,
+            list_cleared,
+        ) = card_selector.select_all(
+            selection_requests,
+            on_save=persist_draft,
+            on_cancel=restore_original_list,
         )
     except RuntimeError as error:
         logger.warning("Image selector unavailable: %s", error)
         selections = [candidates[0] for _, _, candidates in selection_requests]
         selection_quantities = [quantity for _, quantity, _ in selection_requests]
         additional_selections = []
+        selection_finished = False
+        list_cleared = False
+
+    if list_cleared:
+        to_order.clear()
+        set_counters.clear()
+        missing.clear()
 
     for (wanted, _, _), selected, quantity in zip(
         selection_requests,
@@ -168,12 +235,15 @@ def process_cards(
         selection_quantities,
     ):
         if not selected:
-            missing.append(wanted)
+            if not list_cleared:
+                missing.append(wanted)
             continue
         add_to_order(selected, quantity, set_counters, to_order)
 
     for selected, quantity in additional_selections:
         add_to_order(selected, quantity, set_counters, to_order)
+
+    return selection_finished
 
 
 def write_output(to_order, missing, market_estimate=None):
@@ -376,7 +446,7 @@ def main():
             thumbnail_prefetch_idle_seconds=config.THUMBNAIL_PREFETCH_IDLE_SECONDS,
         )
 
-    process_cards(
+    selection_finished = process_cards(
         wanted_cards,
         vendor_cards,
         set_counters,
@@ -385,6 +455,17 @@ def main():
         image_links,
         card_selector,
     )
+
+    if selection_finished:
+        try:
+            save_wanted_cards(config.WANTED_CARDS_SOURCE, to_order)
+            logger.info(
+                "Persisted %d selected card line(s) to %s.",
+                len(to_order),
+                config.WANTED_CARDS_SOURCE,
+            )
+        except (OSError, ValueError) as error:
+            logger.warning("Could not persist selected cards to disk: %s", error)
 
     logger.info("Total Missing Cards: %d", len(missing))
     logger.info(set_counters)

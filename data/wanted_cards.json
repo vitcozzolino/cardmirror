@@ -1,9 +1,37 @@
 [
-  {"name": "Artist's Talent", "quantity": 4},
-  {"name": "Riverglide Pathway", "quantity": 4},
-  {"name": "Otawara Soaring City", "quantity": 1},
-  {"name": "Steam Vents", "quantity": 4},
-  {"name": "Ledger Shredder", "quantity": 4},
-  {"name": "Spirebluff Canal", "quantity": 4},
-  {"name": "Into the Flood Maw", "quantity": 3}
+  {
+    "name": "Artist's Talent #124",
+    "quantity": 4,
+    "set": "SINGLES: HOLO CARDS"
+  },
+  {
+    "name": "Into the Flood Maw(洪水の大口へ) foil",
+    "quantity": 3,
+    "set": "SINGLES: FOIL CARDS"
+  },
+  {
+    "name": "Agatha's Soul Cauldron 0366 extend art",
+    "quantity": 4,
+    "set": "Holo Sets: BL HOLO 35"
+  },
+  {
+    "name": "Fear of Missing Out",
+    "quantity": 4,
+    "set": "Holo Sets: BL HOLO 24"
+  },
+  {
+    "name": "Vivi Ornitier #570 Chocobotrackfoil",
+    "quantity": 4,
+    "set": "Foil Sets: BL FOIL 19"
+  },
+  {
+    "name": "Quantum Riddler EOE #305",
+    "quantity": 4,
+    "set": "Holo Sets: BL HOLO 50"
+  },
+  {
+    "name": "Stormchaser's Talent (BLB)",
+    "quantity": 4,
+    "set": "SINGLES: HOLO CARDS"
+  }
 ]

@@ -2,6 +2,7 @@ import csv
 import ipaddress
 import json
 import logging
+import os
 import re
 import socket
 import sqlite3
@@ -73,11 +74,44 @@ def load_wanted_cards_json(uri):
         cards.append(
             {
                 "Wanted": card["name"],
+                "Set": card.get("set", ""),
                 "QTY": card.get("quantity", 1),
             }
         )
 
     return pd.DataFrame(cards)
+
+
+def save_wanted_cards(uri, orders):
+    """Persist the resolved order to a local JSON wanted-card list."""
+    if uri.startswith(("https:", "http:")):
+        raise ValueError("Cannot persist selections to a remote wanted-card list")
+    if not uri.lower().endswith(".json"):
+        raise ValueError("Persisted selections require a local JSON wanted-card list")
+
+    destination = Path(uri)
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    payload = []
+    for order in orders:
+        entry = {
+            "name": str(order.name),
+            "quantity": int(order.quantity),
+        }
+        if getattr(order, "set", ""):
+            entry["set"] = str(order.set)
+        payload.append(entry)
+
+    temporary_path = destination.with_name(f".{destination.name}.tmp")
+    try:
+        with open(temporary_path, "w", encoding="utf-8") as output:
+            json.dump(payload, output, ensure_ascii=False, indent=2)
+            output.write("\n")
+            output.flush()
+            os.fsync(output.fileno())
+        os.replace(temporary_path, destination)
+    except Exception:
+        temporary_path.unlink(missing_ok=True)
+        raise
 
 
 def load_vendor_price_tiers(uri):

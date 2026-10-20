@@ -83,6 +83,14 @@ CardMirror keeps local caches for the vendor catalog, thumbnails, sessions, and
 market prices. These are stored under `output/` and can be deleted when a full
 refresh is needed.
 
+When the picker saves a selection, the local JSON wanted-card list is updated
+atomically with the selected version and quantity. Cancelling the session
+restores the previous list.
+
+Every wanted card is shown in the picker, including cards with only one match;
+use **Remove card** on a row and then save the selections to remove it from the
+disk list.
+
 ## Development
 
 Run the auto-reloading development launcher with:
