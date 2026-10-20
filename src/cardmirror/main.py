@@ -211,6 +211,7 @@ def process_cards(
             additional_selections,
             selection_finished,
             list_cleared,
+            removed_rows,
         ) = card_selector.select_all(
             selection_requests,
             on_save=persist_draft,
@@ -223,19 +224,20 @@ def process_cards(
         additional_selections = []
         selection_finished = False
         list_cleared = False
+        removed_rows = set()
 
     if list_cleared:
         to_order.clear()
         set_counters.clear()
         missing.clear()
 
-    for (wanted, _, _), selected, quantity in zip(
+    for request_index, ((wanted, _, _), selected, quantity) in enumerate(zip(
         selection_requests,
         selections,
         selection_quantities,
-    ):
+    )):
         if not selected:
-            if not list_cleared:
+            if not list_cleared and request_index not in removed_rows:
                 missing.append(wanted)
             continue
         add_to_order(selected, quantity, set_counters, to_order)

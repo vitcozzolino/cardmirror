@@ -1,37 +1,42 @@
 [
   {
-    "name": "Artist's Talent #124",
+    "name": "Agatha's Soul Cauldron 0366 extend art",
     "quantity": 4,
     "set": "SINGLES: HOLO CARDS"
   },
   {
-    "name": "Into the Flood Maw(洪水の大口へ) foil",
-    "quantity": 3,
-    "set": "SINGLES: FOIL CARDS"
-  },
-  {
-    "name": "Agatha's Soul Cauldron 0366 extend art",
-    "quantity": 4,
-    "set": "Holo Sets: BL HOLO 35"
-  },
-  {
     "name": "Fear of Missing Out",
     "quantity": 4,
-    "set": "Holo Sets: BL HOLO 24"
+    "set": "SINGLES: HOLO CARDS"
   },
   {
     "name": "Vivi Ornitier #570 Chocobotrackfoil",
     "quantity": 4,
-    "set": "Foil Sets: BL FOIL 19"
+    "set": "SINGLES: FOIL CARDS"
   },
   {
     "name": "Quantum Riddler EOE #305",
     "quantity": 4,
-    "set": "Holo Sets: BL HOLO 50"
+    "set": "SINGLES: HOLO CARDS"
   },
   {
     "name": "Stormchaser's Talent (BLB)",
     "quantity": 4,
     "set": "SINGLES: HOLO CARDS"
+  },
+  {
+    "name": "Riverpyre Verge DFT #372",
+    "quantity": 4,
+    "set": "SINGLES: HOLO CARDS"
+  },
+  {
+    "name": "Improvisation Capstone SOS #294",
+    "quantity": 4,
+    "set": "SINGLES: HOLO CARDS"
+  },
+  {
+    "name": "The Theorist, Jace Beleren FRA #443 foil",
+    "quantity": 4,
+    "set": "SINGLES: FOIL CARDS 2"
   }
 ]

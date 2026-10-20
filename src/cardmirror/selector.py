@@ -552,7 +552,7 @@ class CardSelector:
         selections = [None] * len(selection_requests)
         selection_quantities = [quantity for _, quantity, _ in selection_requests]
         additional_selections = []
-        completion_state = {"finished": False, "list_cleared": False}
+        completion_state = {"finished": False, "list_cleared": False, "removed_rows": []}
         completed = threading.Event()
         session_id = self.session_store.create()
         page, image_ids = self._build_page(selection_requests, image_data)
@@ -599,6 +599,7 @@ class CardSelector:
             additional_selections,
             completion_state["finished"],
             completion_state["list_cleared"],
+            completion_state["removed_rows"],
         )
 
     def _create_thumbnail_prefetcher(self, image_data):
@@ -734,6 +735,7 @@ class CardSelector:
                 f'<div class="row-content"><div class="row-controls">'
                 f'<label>Quantity <input class="quantity-input" type="number" '
                 f'name="quantity-{request_index}" min="1" value="{quantity}"></label>'
+                f'<input type="hidden" name="present-{request_index}" value="1">'
                 f'<input type="hidden" name="confirmed-{request_index}" value="0">'
                 f'<div class="row-actions"><button type="button" class="remove-row">Remove card</button>'
                 f'<button type="button" class="confirm-row">Confirm card</button></div></div>'
@@ -873,7 +875,7 @@ button:hover {{ filter: brightness(1.08); transform: translateY(-1px); }}
 </style>
 </head>
 <body>
-<form action="/select" method="post">
+<form id="selection-form" action="/select" method="post">
 <header>
 <div class="header-inner">
 <p class="eyebrow">CardMirror / Card review</p>
@@ -890,11 +892,13 @@ button:hover {{ filter: brightness(1.08); transform: translateY(-1px); }}
 <div class="table-heading"><div><p class="eyebrow">Order review</p><h2>Card versions</h2></div><div class="live-totals"><div class="live-total" aria-live="polite"><span>Estimated order</span><strong id="estimated-cost">—</strong><small id="estimated-rate">Pricing unavailable</small><small id="card-total">0 cards</small></div><div class="live-total" aria-live="polite"><span>Estimated market cost</span><strong id="market-cost">—</strong><small id="market-rate">Confirm cards to estimate</small></div></div></div>
 <main id="card-table" class="card-table">{"".join(rows)}</main>
 </div>
-<div class="submit"><button id="clear-list" class="clear-list" type="button">Clear list</button><span id="confirmed-count" class="save-note">0 cards confirmed</span><input id="list-cleared" type="hidden" name="list-cleared" value="0"><button type="submit">Save selections <span aria-hidden="true">→</span></button></div>
+<div class="submit"><button id="clear-list" class="clear-list" type="button">Clear list</button><span id="confirmed-count" class="save-note">0 cards confirmed</span><span class="save-note">Changes are saved to the local list</span><input id="list-cleared" type="hidden" name="list-cleared" value="0"><button id="save-to-disk" type="submit">Save changes to disk <span aria-hidden="true">→</span></button></div>
 </form>
 <div id="image-modal" class="image-modal" hidden role="dialog" aria-modal="true" aria-labelledby="image-modal-caption"><div class="image-modal-dialog"><button id="image-modal-close" class="image-modal-close" type="button" aria-label="Close image preview">Close</button><img id="expanded-image" alt=""><p id="image-modal-caption" class="image-modal-caption"></p></div></div>
 <script>
 const searchInput = document.getElementById('proxy-search');
+const selectionForm = document.getElementById('selection-form');
+const saveToDiskButton = document.getElementById('save-to-disk');
 const suggestions = document.getElementById('suggestions');
 const draftArea = document.getElementById('draft-area');
 const cardTable = document.getElementById('card-table');
@@ -950,6 +954,11 @@ function loadLocalSelectionState() {{
 
 const restoredSelectionState = serverRestoredSelectionState || loadLocalSelectionState();
 let listCleared = Boolean(restoredSelectionState && restoredSelectionState.cleared);
+let removedInitialRows = new Set(
+  restoredSelectionState && Array.isArray(restoredSelectionState.removed)
+    ? restoredSelectionState.removed
+    : [],
+);
 
 function captureSelectionState() {{
   const initial = Array.from(cardTable.querySelectorAll('.card-row[data-row-key]'))
@@ -982,7 +991,7 @@ function captureSelectionState() {{
       }};
     }})
     .filter((row) => Number.isFinite(row.id) && row.name && row.card_set && row.quantity > 0);
-  return {{ initial, additional, cleared: listCleared }};
+  return {{ initial, additional, cleared: listCleared, removed: Array.from(removedInitialRows) }};
 }}
 
 function persistSelectionState() {{
@@ -1382,6 +1391,11 @@ function bindRow(row) {{
     markChanged(); setAdditionalVersion(input);
   }}));
   removeButton.addEventListener('click', () => {{
+    const rowKey = row.dataset.rowKey || '';
+    if (rowKey.startsWith('initial-')) {{
+      const rowNumber = Number.parseInt(rowKey.replace('initial-', ''), 10);
+      if (Number.isFinite(rowNumber)) removedInitialRows.add(rowNumber);
+    }}
     row.remove();
     updateDraftArea();
     updateConfirmedCount();
@@ -1428,6 +1442,10 @@ function restoreSelectionState() {{
   if (restoredSelectionState.cleared) {{
     clearAllCardRows();
   }}
+  for (const rowNumber of restoredSelectionState.removed || []) {{
+    const row = document.querySelector('[data-row-key="initial-' + rowNumber + '"]');
+    if (row) row.remove();
+  }}
   for (const restored of restoredSelectionState.initial || []) {{
     const row = document.querySelector('[data-row-key="initial-' + restored.row + '"]');
     if (!row) continue;
@@ -1466,6 +1484,10 @@ function restoreSelectionState() {{
 }}
 
 document.querySelectorAll('.card-row').forEach(bindRow);
+selectionForm.addEventListener('submit', () => {{
+  saveToDiskButton.disabled = true;
+  saveToDiskButton.textContent = 'Saving changes to disk…';
+}});
 restoreSelectionState();
 updateDraftArea();
 updateConfirmedCount();
@@ -1517,6 +1539,7 @@ preloadFullImages(document);
             for image_page_url, image_id in image_ids.items()
         }
         cleared_state = {"value": False}
+        removed_rows = set()
         favicon_path = Path(__file__).resolve().parents[2] / "assets" / "cardmirror_icon.png"
         try:
             favicon_data = favicon_path.read_bytes()
@@ -1560,6 +1583,9 @@ preloadFullImages(document);
                     return
                 if parsed_url.path == "/cancel":
                     self._cancel_session()
+                    return
+                if parsed_url.path == "/" and session_id:
+                    self._continue_editing()
                     return
                 self._respond_html(page)
 
@@ -1746,16 +1772,25 @@ preloadFullImages(document);
                 cleared_state["value"] = query.get("list-cleared", ["0"])[0] == "1"
                 if completion_state is not None:
                     completion_state["list_cleared"] = cleared_state["value"]
+                    completion_state["removed_rows"] = []
                 for request_index, (_, original_quantity, _) in enumerate(selection_requests):
                     selections[request_index] = None
                     selection_quantities[request_index] = original_quantity
+                removed_rows.clear()
                 additional_selections.clear()
                 for request_index, (_, original_quantity, candidates) in enumerate(selection_requests):
                     wanted = selection_requests[request_index][0]
+                    present = query.get(f"present-{request_index}", [""])[0] == "1"
+                    if not present:
+                        removed_rows.add(request_index)
+                        if completion_state is not None:
+                            completion_state["removed_rows"].append(request_index)
+                        continue
                     confirmed = query.get(f"confirmed-{request_index}", ["0"])[0] == "1"
                     choice = query.get(f"selection-{request_index}", [""])[0]
                     if not confirmed or not choice.isdigit() or int(choice) >= len(candidates):
-                        skipped_rows.append(wanted)
+                        selections[request_index] = 0
+                        selected_rows.append((wanted, candidates[0], original_quantity))
                         continue
                     selections[request_index] = int(choice)
                     quantity = self._quantity(
@@ -1815,6 +1850,7 @@ preloadFullImages(document);
                     ],
                     "additional": [],
                     "cleared": cleared_state["value"],
+                    "removed": sorted(removed_rows),
                 }
                 for candidate, quantity in additional_selections:
                     image_id = image_ids.get(candidate.image_url)
