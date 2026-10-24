@@ -10,11 +10,6 @@
     "set": "SINGLES: HOLO CARDS"
   },
   {
-    "name": "Vivi Ornitier #570 Chocobotrackfoil",
-    "quantity": 4,
-    "set": "SINGLES: FOIL CARDS"
-  },
-  {
     "name": "Quantum Riddler EOE #305",
     "quantity": 4,
     "set": "SINGLES: HOLO CARDS"
@@ -38,5 +33,10 @@
     "name": "The Theorist, Jace Beleren FRA #443 foil",
     "quantity": 4,
     "set": "SINGLES: FOIL CARDS 2"
+  },
+  {
+    "name": "Vivi Ornitier #321",
+    "quantity": 4,
+    "set": "Holo Sets: BL HOLO 32"
   }
 ]
